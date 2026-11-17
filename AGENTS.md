@@ -43,6 +43,20 @@ directly; if a change makes that test awkward, the change is wrong.
   that a capture it was never part of had ended.
 - **The hub forgets `last_sequence` at `capture_started`**, so a driver may
   restart its count per session or carry one counter across restarts.
+- **A frame is only ever served to a consumer that belongs to its capture
+  session.** `serve/2` checks `in_session?` as well as demand. Without it a
+  consumer arriving while a stop was in flight could be handed a frame from
+  the outgoing session.
+- **Ending a session spends the demand of consumers it notified, and only
+  those.** A consumer that arrived during the stop was told nothing, so its
+  request is still outstanding and must survive into the next session.
+  Clearing it is invisible to the consumer, which then sits out its whole
+  timeout on a camera that restarted perfectly well.
+- **The Membrane source releases its subscription at end of stream.** Staying
+  subscribed would keep the hub's subscriber count above zero, which is what
+  it restarts capture on — leaving a camera capturing for an element that will
+  never read another buffer. With `end_of_stream_on_capture_end?: false` it
+  instead re-offers its outstanding demand, which the hub has just spent.
 - **`c:BB.Camera.stream_info/1` must be pure.** Discovery calls it on robots
   that aren't running.
 - **`BB.Camera.Info` carries no driver options**, so device paths and
@@ -63,7 +77,17 @@ asking a driver to do something and the driver confirming — every lifecycle
 race lives in that window.
 
 To show something *didn't* happen, push a synchronous call through the process
-first, then `refute_received` without waiting.
+first, then `refute_received` without waiting. There are no timed
+`refute_receive`s in this suite and there should not be one.
+
+Two mistakes this suite has made and corrected, worth not repeating:
+
+- **Producing several frames and then asserting several buffers.** The camera
+  holds only the latest frame, so that asserts the consumer happened to be
+  scheduled between deliveries — green on a quiet laptop, red under CI load.
+  Collect each frame before producing the next.
+- **Reading a `BB.Camera.Media` session from a process that didn't open it.**
+  Frames go to the subscription's owner, so the reader must be the opener.
 
 ## Running things
 

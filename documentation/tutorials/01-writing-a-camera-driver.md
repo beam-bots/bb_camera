@@ -193,6 +193,23 @@ what doesn't happen when a camera has wedged. You need an explicit reaper;
 A native capture callback pushing frames into a process mailbox has the same
 shape of problem and wants the same kind of answer.
 
+## If your driver feeds a Membrane pipeline
+
+`BB.Camera.Membrane.Source` is compiled only when Membrane is loaded, because
+Membrane's `ratio` pins `decimal` below what `bb` wants — and below the
+versions that fix its DoS advisories. Opting in means three additions to *your*
+`mix.exs`, including the override, which Mix only honours from the top-level
+project:
+
+```elixir
+{:membrane_core, "~> 1.3"},
+{:membrane_jpeg_format, "~> 0.1"},
+{:decimal, "~> 3.0", override: true}
+```
+
+Nothing a driver does requires any of this. The hub interface is the same
+either way.
+
 ## Testing it
 
 Clock your driver externally and drive it frame by frame. Never sleep, and

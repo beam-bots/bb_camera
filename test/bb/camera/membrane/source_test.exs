@@ -8,9 +8,10 @@ defmodule BB.Camera.Membrane.SourceTest do
   import Membrane.ChildrenSpec
   import Membrane.Testing.Assertions
 
+  alias BB.Camera.{Frame, StreamInfo, Synthetic, TestDriver}
   alias BB.Camera.Membrane.Source
-  alias BB.Camera.{StreamInfo, Synthetic, TestDriver}
   alias BB.Camera.TestBots.{GatedCamera, SingleCamera}
+  alias BB.Message.Camera.BeginCapture
   alias Membrane.Testing
 
   describe "in a real pipeline" do
@@ -20,9 +21,11 @@ defmodule BB.Camera.Membrane.SourceTest do
     end
 
     test "a sink downstream of the source receives the camera's JPEG frames" do
+      BB.subscribe(SingleCamera, [:sensor, :head, :eye])
       pipeline = start_pipeline(SingleCamera, :eye)
 
       assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{width: 160, height: 120})
+      :ok = await_capture()
 
       :ok = Synthetic.capture_frame(SingleCamera, :eye)
 
@@ -33,12 +36,20 @@ defmodule BB.Camera.Membrane.SourceTest do
     end
 
     test "successive frames arrive in order with increasing sequence metadata" do
+      BB.subscribe(SingleCamera, [:sensor, :head, :eye])
       pipeline = start_pipeline(SingleCamera, :eye)
       assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      :ok = await_capture()
 
-      for _ <- 1..3, do: :ok = Synthetic.capture_frame(SingleCamera, :eye)
-
+      # One frame at a time, each asserted before the next is produced. The
+      # camera only ever holds the latest frame, so producing three in a row
+      # and expecting three buffers would be asserting that the source happened
+      # to be scheduled between them - which is exactly the kind of thing that
+      # passes here and fails under CI load.
+      :ok = Synthetic.capture_frame(SingleCamera, :eye)
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{metadata: %{bb_camera: first}})
+
+      :ok = Synthetic.capture_frame(SingleCamera, :eye)
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{metadata: %{bb_camera: second}})
 
       assert second.sequence > first.sequence
@@ -47,8 +58,10 @@ defmodule BB.Camera.Membrane.SourceTest do
     end
 
     test "presentation timestamps start at zero and advance" do
+      BB.subscribe(SingleCamera, [:sensor, :head, :eye])
       pipeline = start_pipeline(SingleCamera, :eye)
       assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      :ok = await_capture()
 
       :ok = Synthetic.capture_frame(SingleCamera, :eye)
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{pts: first_pts})
@@ -95,11 +108,37 @@ defmodule BB.Camera.Membrane.SourceTest do
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
       assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
 
-      for n <- 1..3, do: :ok = TestDriver.deliver(GatedCamera, :eye, "frame-#{n}")
+      # Each frame is collected before the next is produced. A pipeline keeping
+      # up sees every frame; this asserts that, and nothing about scheduling.
+      for n <- 1..3 do
+        payload = "frame-#{n}"
+        :ok = TestDriver.deliver(GatedCamera, :eye, payload)
+        assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: ^payload})
+      end
 
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "frame-1"})
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "frame-2"})
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "frame-3"})
+      Testing.Pipeline.terminate(pipeline)
+    end
+
+    test "the camera holds one frame however many the pipeline has taken" do
+      pipeline = start_pipeline(GatedCamera, :eye)
+
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+
+      for n <- 1..4 do
+        payload = "produced-#{n}"
+        :ok = TestDriver.deliver(GatedCamera, :eye, payload)
+        assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: ^payload})
+      end
+
+      # What a pipeline buffers downstream of the source is Membrane's
+      # business. What bb_camera is answerable for is that the camera's own
+      # memory doesn't grow with it: one frame held, one request outstanding,
+      # no matter how many have gone past.
+      hub = BB.Process.whereis(GatedCamera, {:camera, :eye})
+      assert %Frame{sequence: 3} = :sys.get_state(hub).latest
+      assert [%{demand?: true}] = subscribers(hub)
 
       Testing.Pipeline.terminate(pipeline)
     end
@@ -156,6 +195,79 @@ defmodule BB.Camera.Membrane.SourceTest do
     end
   end
 
+  describe "end of capture" do
+    setup do
+      start_supervised!(GatedCamera)
+      :ok = TestDriver.report_to(GatedCamera, :eye)
+      :ok
+    end
+
+    test "ending the stream releases the camera rather than leaving it capturing" do
+      pipeline = start_pipeline(GatedCamera, :eye, end_of_stream_on_capture_end?: true)
+
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+
+      :ok = TestDriver.confirm_stop(GatedCamera, :eye)
+      assert_end_of_stream(pipeline, :sink)
+
+      # The element stopped consuming, so it must stop being a consumer. If it
+      # stayed subscribed the hub would see a subscriber and keep asking the
+      # driver to capture - for an element that will never read another buffer.
+      #
+      # The hub does restart once on the way past, because it decides whether
+      # to restart before the element has had a chance to leave. That is a
+      # single bounded flap, and it ends with the driver asked to stop and
+      # nobody subscribed, which is what this asserts.
+      assert_receive {:driver, :stop_capture}
+
+      hub = BB.Process.whereis(GatedCamera, {:camera, :eye})
+      assert [] = subscribers(hub)
+
+      Testing.Pipeline.terminate(pipeline)
+    end
+
+    test "a released element emits nothing for a frame still in flight" do
+      # Unsubscribing doesn't recall a message already on its way, so the
+      # element has to tolerate one. Exercised directly: there is no way to
+      # time the arrival of an in-flight message through a live pipeline
+      # without guessing, and guessing is what these tests don't do.
+      frame = Frame.new!(format: :jpeg, width: 64, height: 48, data: "too-late", sequence: 9)
+      released = %{subscription: nil, demand: 1, epoch: nil}
+
+      assert {[], ^released} = Source.handle_info({:bb_camera, make_ref(), frame}, nil, released)
+
+      assert {[], ^released} =
+               Source.handle_info({:bb_camera, make_ref(), :end_of_capture}, nil, released)
+    end
+
+    test "staying through a restart resumes rather than stalling" do
+      pipeline = start_pipeline(GatedCamera, :eye, end_of_stream_on_capture_end?: false)
+
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+
+      :ok = TestDriver.deliver(GatedCamera, :eye, "before-restart")
+      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "before-restart"})
+
+      # Capture ends with the element still subscribed and Membrane's demand
+      # still outstanding. The hub spends the demand of everyone it told the
+      # capture had ended, so an element that doesn't re-offer it would sit
+      # here forever once capture came back.
+      :ok = TestDriver.confirm_stop(GatedCamera, :eye)
+
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+
+      :ok = TestDriver.deliver(GatedCamera, :eye, "after-restart")
+      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "after-restart"})
+
+      Testing.Pipeline.terminate(pipeline)
+    end
+  end
+
   describe "refusing what it can't carry" do
     test "setup fails rather than the element starting against a camera it can't read" do
       {[], state} =
@@ -177,8 +289,21 @@ defmodule BB.Camera.Membrane.SourceTest do
   defp start_pipeline(robot, camera, opts \\ []) do
     Testing.Pipeline.start_supervised!(
       spec:
-        child(:camera, %Source{robot: robot, camera: camera})
+        child(:camera, %Source{
+          robot: robot,
+          camera: camera,
+          end_of_stream_on_capture_end?: Keyword.get(opts, :end_of_stream_on_capture_end?, true)
+        })
         |> child(:sink, %Testing.Sink{autodemand: Keyword.get(opts, :autodemand, true)})
     )
+  end
+
+  # `handle_playing` emits the stream format before the driver has been asked
+  # to start, let alone confirmed. Anything that then drives an externally
+  # clocked camera has to wait for the confirmation or it races it and gets
+  # `NotCapturing`.
+  defp await_capture do
+    assert_receive {:bb, _, %BB.Message{payload: %BeginCapture{}}}
+    :ok
   end
 end

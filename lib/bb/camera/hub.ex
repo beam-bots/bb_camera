@@ -586,9 +586,21 @@ defmodule BB.Camera.Hub do
     end)
   end
 
+  # A subscriber that was in the session has been told the capture ended, so
+  # its request has been answered and its demand is spent.
+  #
+  # One that arrived while the stop was in flight was told nothing, because
+  # nothing that concerned it happened. Its request is still outstanding and
+  # must survive into the next session - dropping it here is invisible to the
+  # consumer, which would simply wait out its timeout on a camera that had
+  # restarted perfectly well.
   defp end_session(subscribers) do
-    Map.new(subscribers, fn {ref, subscriber} ->
-      {ref, %{subscriber | in_session?: false, last_sequence: nil, demand?: false}}
+    Map.new(subscribers, fn
+      {ref, %{in_session?: true} = subscriber} ->
+        {ref, %{subscriber | in_session?: false, last_sequence: nil, demand?: false}}
+
+      {ref, subscriber} ->
+        {ref, %{subscriber | last_sequence: nil}}
     end)
   end
 
@@ -634,7 +646,7 @@ defmodule BB.Camera.Hub do
   defp serve(state, ref) do
     subscriber = state.subscribers[ref]
 
-    if subscriber.demand? and fresh?(state.latest, subscriber) do
+    if servable?(subscriber, state.latest) do
       send_stream_info_if_changed(state, ref, subscriber)
       send(subscriber.pid, {:bb_camera, ref, state.latest})
 
@@ -647,6 +659,14 @@ defmodule BB.Camera.Hub do
     else
       state
     end
+  end
+
+  # A frame belongs to the capture session it was produced in, and so does a
+  # consumer. Serving one across that boundary would hand a consumer a frame
+  # from a session it never joined - and worse, set its idea of what it has
+  # seen from a sequence the next session knows nothing about.
+  defp servable?(subscriber, frame) do
+    subscriber.demand? and subscriber.in_session? and fresh?(frame, subscriber)
   end
 
   defp fresh?(_frame, %{last_sequence: nil}), do: true

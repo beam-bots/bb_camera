@@ -97,23 +97,61 @@ Nothing in the interface assumes where frames come from. A driver reading a
 device through a subprocess, one calling a platform capture API from a NIF, and
 one synthesising frames all meet it identically.
 
-## Membrane is optional
-
-`membrane_core` and `membrane_jpeg_format` are optional dependencies, and
-`BB.Camera.Membrane.Source` is only compiled when they're present. Membrane
-constrains `decimal` to `~> 2.0` through `ratio`, which a robot that isn't
-building a media pipeline shouldn't have to accept. Add them yourself if you
-want the source element.
-
 ## Installation
+
+This package is an unreleased spike and is not on Hex yet. Depend on a
+checkout:
 
 ```elixir
 def deps do
   [
-    {:bb_camera, "~> 0.1"}
+    {:bb, path: "../bb"},
+    {:bb_camera, path: "../bb_camera"}
   ]
 end
 ```
+
+Once it is published, `{:bb_camera, "~> 0.1"}` will do instead.
+
+## Membrane is optional
+
+`BB.Camera.Membrane.Source` needs `membrane_core` and `membrane_jpeg_format`,
+and both are **optional dependencies** — the element is compiled only when
+they're loaded. Everything else in the package works without them.
+
+That is not tidiness. Membrane depends on `ratio`, which declares
+`decimal ~> 1.6 or ~> 2.0`, while `bb` wants `decimal 3.x` through `localize`.
+A robot that isn't building a media pipeline shouldn't be dragged down to a
+`decimal` it doesn't want — and `decimal 2.4.1` carries two open DoS
+advisories, so being dragged there also fails `mix hex.audit`.
+
+If you want the source element, add all three lines:
+
+```elixir
+def deps do
+  [
+    {:bb, path: "../bb"},
+    {:bb_camera, path: "../bb_camera"},
+
+    {:membrane_core, "~> 1.3"},
+    {:membrane_jpeg_format, "~> 0.1"},
+
+    # `ratio` pins `decimal` below what `bb` wants and below the versions that
+    # fix CVE-2026-97853 and CVE-2026-32686. `ratio` treats `decimal` as
+    # optional and Membrane never hands it one, so overriding is safe.
+    {:decimal, "~> 3.0", override: true}
+  ]
+end
+```
+
+The override has to be in *your* `mix.exs`: Mix only honours `override: true`
+from the top-level project, so the copy `bb_camera` carries for its own
+dev/test tree does nothing for you.
+
+If you skip the override you'll resolve to `decimal 2.4.1` and `mix hex.audit`
+will fail. If you skip the Membrane deps entirely, `BB.Camera.Membrane.Source`
+simply won't exist — `Code.ensure_loaded?/1` is the way to check for it at
+runtime.
 
 ## Licence
 

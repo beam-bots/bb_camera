@@ -85,8 +85,7 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
          subscription: nil,
          stream_info: nil,
          demand: 0,
-         epoch: nil,
-         format_sent?: false
+         epoch: nil
        }}
     end
 
@@ -103,7 +102,7 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
 
     @impl true
     def handle_playing(_ctx, state) do
-      {stream_format_action(state), %{state | format_sent?: true}}
+      {stream_format_action(state), state}
     end
 
     @impl true
@@ -112,7 +111,14 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
       {[], pull(state)}
     end
 
+    # Once the subscription has been released - at end of stream - anything
+    # still in flight from the camera describes a stream this element has
+    # already ended. Matched explicitly rather than left to fall through the
+    # guards below, which would only work because reading a field of `nil`
+    # makes a guard fail rather than raise.
     @impl true
+    def handle_info(_message, _ctx, %{subscription: nil} = state), do: {[], state}
+
     def handle_info({:bb_camera, ref, %Frame{} = frame}, _ctx, state)
         when ref == state.subscription.ref do
       state = %{
@@ -133,9 +139,18 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
     def handle_info({:bb_camera, ref, :end_of_capture}, _ctx, state)
         when ref == state.subscription.ref do
       if state.end_of_stream_on_capture_end? do
-        {[end_of_stream: :output], state}
+        # The stream is over for this element, so stop being a consumer of the
+        # camera. Staying subscribed would keep the hub's subscriber count
+        # above zero, which is what it restarts capture on - leaving a camera
+        # capturing for an element that will never read another buffer.
+        Camera.unsubscribe(state.subscription)
+        {[end_of_stream: :output], %{state | subscription: nil}}
       else
-        {[], state}
+        # Staying put means resuming when capture does. The hub spends the
+        # demand of everyone it told the capture had ended, so the demand
+        # Membrane has given us has to be re-offered or the resumed stream
+        # never produces a buffer.
+        {[], pull(state)}
       end
     end
 
@@ -161,6 +176,7 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
     # while a frame is in flight is a no-op there. Asking once per demanded
     # buffer, as each arrives, is what keeps the pipeline's demand and the
     # camera's in step.
+    defp pull(%{subscription: nil} = state), do: state
     defp pull(%{demand: 0} = state), do: state
 
     defp pull(state) do

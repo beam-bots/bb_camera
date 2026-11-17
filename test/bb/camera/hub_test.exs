@@ -6,7 +6,7 @@ defmodule BB.Camera.HubTest do
   use ExUnit.Case, async: false
 
   alias BB.Camera
-  alias BB.Camera.{Frame, Hub, Settings, StreamInfo, TestDriver}
+  alias BB.Camera.{Frame, Hub, Media, Settings, StreamInfo, TestDriver}
   alias BB.Camera.TestBots.GatedCamera
   alias BB.Error.Hardware.Camera.CaptureFailed
   alias BB.Message.Camera.{ApplySettings, BeginCapture, EndCapture, RejectSettings}
@@ -93,9 +93,14 @@ defmodule BB.Camera.HubTest do
       {:ok, second} = Camera.subscribe(GatedCamera, :eye)
       second_ref = second.ref
 
+      # `confirm_stop` is a call through the driver into the hub, so when it
+      # returns the hub has finished ending the session and sent whatever it
+      # was going to send. Checking the mailbox without waiting is therefore
+      # conclusive, where a timed `refute_receive` would only be a guess that
+      # happened to hold on an idle machine.
       :ok = TestDriver.confirm_stop(GatedCamera, :eye)
 
-      refute_receive {:bb_camera, ^second_ref, :end_of_capture}, 50
+      refute_received {:bb_camera, ^second_ref, :end_of_capture}
       assert_receive {:driver, :start_capture}
     end
 
@@ -162,6 +167,83 @@ defmodule BB.Camera.HubTest do
       :ok = TestDriver.deliver(GatedCamera, :eye, "session-two")
 
       assert_receive {:bb_camera, ^ref, %Frame{data: "session-two", sequence: 0}}
+    end
+  end
+
+  describe "a consumer that arrives while a stop is in flight" do
+    test "is not served a frame from the session it never joined" do
+      {:ok, first} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+
+      :ok = Camera.unsubscribe(first)
+      assert_receive {:driver, :stop_capture}
+
+      # Inside the stop window: a new consumer arrives and asks for a frame,
+      # and the old session produces one more.
+      {:ok, second} = Camera.subscribe(GatedCamera, :eye)
+      second_ref = second.ref
+      :ok = Camera.request(second)
+      :ok = TestDriver.deliver(GatedCamera, :eye, "belongs-to-the-old-session")
+
+      # `deliver` is a call through the driver into the hub, so the hub has
+      # finished with that frame by now. It isn't this consumer's to have.
+      refute_received {:bb_camera, ^second_ref, %Frame{}}
+    end
+
+    test "keeps its request across the restart instead of waiting out a timeout" do
+      {:ok, first} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+
+      :ok = Camera.unsubscribe(first)
+      assert_receive {:driver, :stop_capture}
+
+      {:ok, second} = Camera.subscribe(GatedCamera, :eye)
+      second_ref = second.ref
+      :ok = Camera.request(second)
+      :ok = TestDriver.deliver(GatedCamera, :eye, "belongs-to-the-old-session")
+
+      :ok = TestDriver.confirm_stop(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+
+      # The request was made before the restart and never answered, so it is
+      # still outstanding. Clearing it along with the ended session's requests
+      # would be invisible to the consumer, which would sit through its whole
+      # timeout on a camera that had come back perfectly well.
+      :ok = TestDriver.deliver(GatedCamera, :eye, "belongs-to-the-new-session")
+
+      assert_receive {:bb_camera, ^second_ref, %Frame{data: "belongs-to-the-new-session"}}
+    end
+
+    test "a media session reads the first frame of the new capture without re-asking" do
+      {:ok, keeper} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+      :ok = Camera.unsubscribe(keeper)
+      assert_receive {:driver, :stop_capture}
+
+      parent = self()
+
+      # The session has to be opened by the process that will read from it -
+      # frames go to the subscription's owner - so the reader opens it and
+      # says when it is in, which is inside the stop window.
+      reader =
+        Task.async(fn ->
+          {:ok, session} = Media.open(GatedCamera, :eye)
+          send(parent, :opened)
+          Media.next(session, 5_000)
+        end)
+
+      assert_receive :opened
+
+      :ok = TestDriver.confirm_stop(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+      :ok = TestDriver.deliver(GatedCamera, :eye, "first-of-the-new-session")
+
+      assert {:ok, %Frame{data: "first-of-the-new-session"}} = Task.await(reader)
     end
   end
 
