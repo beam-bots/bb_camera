@@ -108,8 +108,22 @@ defmodule BB.Camera.Synthetic do
   has taken the frame, so a test can request, capture and assert without
   waiting on anything.
 
-  Returns `{:error, %BB.Error.State.Camera.NotCapturing{}}` when nobody is
-  subscribed, since there is no capture session for the frame to belong to.
+  Returns `{:error, %BB.Error.State.Camera.NotCapturing{}}` until a consumer
+  has subscribed *and* this driver has confirmed capture started. Subscribing
+  is not enough: the hub asks the driver to start and the driver answers
+  asynchronously, so a test that opens a session and immediately captures will
+  race that answer.
+
+  Wait for the event rather than guessing at the gap:
+
+      BB.subscribe(MyRobot, [:sensor, :head, :eye])
+      {:ok, session} = BB.Camera.Media.open(MyRobot, :eye)
+      assert_receive {:bb, _, %BB.Message{payload: %BB.Message.Camera.BeginCapture{}}}
+
+      :ok = BB.Camera.Synthetic.capture_frame(MyRobot, :eye)
+
+  Anything driving an externally clocked camera from behind a consumer needs
+  this, so it is worth doing once in a test `setup`.
   """
   @spec capture_frame(module(), atom()) :: :ok | {:error, struct()}
   def capture_frame(robot, camera) do
