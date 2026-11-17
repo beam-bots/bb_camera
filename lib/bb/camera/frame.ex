@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 James Harton
+#
+# SPDX-License-Identifier: Apache-2.0
+
+defmodule BB.Camera.Frame do
+  @moduledoc """
+  One independently decodable frame of media.
+
+  Deliberately *not* a `BB.Message`. Frames never travel over `BB.PubSub` -
+  they go over the bounded interface `BB.Camera.Hub` serves, and nowhere else.
+  Putting megabytes of image data through a fan-out registry with no
+  backpressure is the specific failure mode this package exists to avoid.
+
+  ## Dimensions
+
+  `width` and `height` are the dimensions the frame is *actually* encoded at,
+  which is not necessarily what the camera was asked for. A driver that can
+  parse them out of the data - the SOF marker of a JPEG, say - should do so
+  rather than echoing back its own request.
+
+  ## Timestamps
+
+  `monotonic_time` and `wall_time` are both integer nanoseconds, matching
+  `BB.Message`'s envelope. `monotonic_time` is the one to measure intervals
+  with and may be negative; `wall_time` is the one to display.
+  `DateTime.from_unix!(frame.wall_time, :nanosecond)` if you want a `DateTime`.
+
+  Stamp them with the moment the frame was captured when you know it - for a
+  port-based driver, when the frame's last byte left the port - rather than
+  leaving them to default to when the struct happened to be built.
+
+  ## Sequence
+
+  `sequence` identifies the frame within its capture session and must strictly
+  increase *within that session*. Consumers are promised a frame strictly newer
+  than the last one they received, and that promise rests entirely on this
+  number. A driver with its own counter should set it; one that leaves it `nil`
+  gets it stamped by the hub.
+
+  The hub forgets the last sequence it saw whenever capture is confirmed
+  started, so a driver may restart its count at zero for each session or carry
+  a single counter across restarts - whichever its capture backend makes
+  natural. Neither is more correct, and the hub accepts both.
+  """
+
+  alias BB.Camera.Format
+
+  defstruct [
+    :format,
+    :width,
+    :height,
+    :data,
+    :sequence,
+    :monotonic_time,
+    :wall_time,
+    metadata: %{}
+  ]
+
+  @type t :: %__MODULE__{
+          format: Format.t(),
+          width: pos_integer(),
+          height: pos_integer(),
+          data: binary(),
+          sequence: non_neg_integer() | nil,
+          monotonic_time: integer(),
+          wall_time: integer(),
+          metadata: map()
+        }
+
+  @schema [
+    format: [type: :atom, required: true, doc: "Media format; see `BB.Camera.Format`"],
+    width: [type: :pos_integer, required: true, doc: "Encoded width in pixels"],
+    height: [type: :pos_integer, required: true, doc: "Encoded height in pixels"],
+    data: [
+      type: {:custom, __MODULE__, :validate_binary, []},
+      required: true,
+      doc: "The encoded frame"
+    ],
+    sequence: [
+      type: {:or, [:non_neg_integer, nil]},
+      default: nil,
+      doc: "Position in the capture session; stamped by the hub when nil"
+    ],
+    monotonic_time: [
+      type: :integer,
+      doc: "Capture time from `System.monotonic_time(:nanosecond)`"
+    ],
+    wall_time: [type: :integer, doc: "Capture time from `System.system_time(:nanosecond)`"],
+    metadata: [type: :map, default: %{}, doc: "Driver-specific extras"]
+  ]
+
+  @doc """
+  Build a frame, validating it and stamping any timestamps left out.
+  """
+  @spec new(keyword()) :: {:ok, t()} | {:error, term()}
+  def new(opts) do
+    with {:ok, opts} <- Spark.Options.validate(opts, @schema),
+         {:ok, _format} <- Format.validate(opts[:format]) do
+      {:ok,
+       struct(
+         __MODULE__,
+         Keyword.merge(
+           [
+             monotonic_time: System.monotonic_time(:nanosecond),
+             wall_time: System.system_time(:nanosecond)
+           ],
+           opts
+         )
+       )}
+    end
+  end
+
+  @doc """
+  Like `new/1`, but raises.
+  """
+  @spec new!(keyword()) :: t()
+  def new!(opts) do
+    case new(opts) do
+      {:ok, frame} -> frame
+      {:error, error} -> raise error
+    end
+  end
+
+  @doc false
+  def validate_binary(value) when is_binary(value), do: {:ok, value}
+  def validate_binary(value), do: {:error, "expected a binary, got: #{inspect(value)}"}
+end
