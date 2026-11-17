@@ -140,6 +140,18 @@ defmodule BB.Camera.MediaTest do
       assert_receive {:DOWN, ^monitor, :process, ^consumer, :normal}
     end
 
+    test "closing a session whose camera is already gone succeeds quietly" do
+      {:ok, session} = Media.open(SingleCamera, :eye)
+      stop_supervised!(SingleCamera)
+
+      # A transport closes its session in an `after` block, over a response it
+      # has usually already written. A close that raised because the camera
+      # went away first would turn a stream that worked into a 500 - so this
+      # has to be the quietest operation in the package.
+      assert :ok = Media.close(session)
+      assert :ok = Media.close(session)
+    end
+
     test "a consumer that had already asked for a frame is told, not left waiting" do
       parent = self()
 
