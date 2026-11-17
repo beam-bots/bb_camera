@@ -111,6 +111,61 @@ defmodule BB.Camera.MediaTest do
     end
   end
 
+  describe "a robot shut down while a consumer is mid-stream" do
+    setup do
+      start_supervised!(SingleCamera)
+      :ok
+    end
+
+    test "reports to the consumer rather than taking it down with the camera" do
+      parent = self()
+
+      # Deliberately unlinked: a consumer is connected to a camera by monitors
+      # in both directions and never by a link, so a camera coming down must
+      # arrive as a return value rather than as an exit signal. Anything that
+      # linked them would make a routine robot shutdown kill every browser
+      # connection's process on the way past.
+      {consumer, monitor} =
+        spawn_monitor(fn ->
+          {:ok, session} = Media.open(SingleCamera, :eye)
+          send(parent, :streaming)
+          send(parent, {:result, Media.next(session, 5_000)})
+        end)
+
+      assert_receive :streaming
+
+      stop_supervised!(SingleCamera)
+
+      assert_receive {:result, {:error, %NotRunning{}}}
+      assert_receive {:DOWN, ^monitor, :process, ^consumer, :normal}
+    end
+
+    test "a consumer that had already asked for a frame is told, not left waiting" do
+      parent = self()
+
+      {_consumer, monitor} =
+        spawn_monitor(fn ->
+          {:ok, subscription} = BB.Camera.subscribe(SingleCamera, :eye)
+          :ok = BB.Camera.request(subscription)
+          send(parent, :waiting)
+
+          receive do
+            {:DOWN, ref, :process, _pid, _reason} when ref == subscription.monitor ->
+              send(parent, :camera_down)
+          after
+            5_000 -> send(parent, :gave_up)
+          end
+        end)
+
+      assert_receive :waiting
+
+      stop_supervised!(SingleCamera)
+
+      assert_receive :camera_down
+      assert_receive {:DOWN, ^monitor, :process, _, :normal}
+    end
+  end
+
   describe "open/3 against a camera that isn't running" do
     test "reports the camera as declared but not running" do
       assert {:error, %NotRunning{}} = Media.open(SingleCamera, :eye)

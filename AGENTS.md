@@ -89,6 +89,26 @@ Two mistakes this suite has made and corrected, worth not repeating:
 - **Reading a `BB.Camera.Media` session from a process that didn't open it.**
   Frames go to the subscription's owner, so the reader must be the opener.
 
+Testing against a driver that *can't* be externally clocked — a real one
+reading real hardware — means arranging quiet rather than waiting for it:
+configure the camera slowly enough that it genuinely cannot produce within the
+window you're asserting about, instead of picking a timeout you hope is long
+enough.
+
+## Consumers are monitored, never linked
+
+A consumer and a camera watch each other with monitors in both directions: the
+hub monitors the subscription's owner so a dead consumer releases the capture,
+and `BB.Camera.subscribe/3` monitors the hub so a dead camera surfaces as an
+error rather than a hang. The only link in the package is driver-to-hub, and
+that is deliberate — they are useless apart.
+
+Don't link a consumer to a camera. A robot shutting down would then kill every
+consumer process on the way past, which for an HTTP transport means taking out
+each connected browser's process instead of ending its response. There are
+tests in `test/bb/camera/media_test.exs` that stop a robot mid-stream and
+assert the consumer exits `:normal` with an error return.
+
 ## Running things
 
 ```bash
