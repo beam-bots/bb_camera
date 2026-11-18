@@ -4,7 +4,16 @@ SPDX-FileCopyrightText: 2026 James Harton
 SPDX-License-Identifier: Apache-2.0
 -->
 
+<img src="https://github.com/beam-bots/bb/blob/main/logos/beam_bots_logo.png?raw=true" alt="Beam Bots Logo" width="250" />
+
 # bb_camera
+
+[![CI](https://github.com/beam-bots/bb_camera/actions/workflows/ci.yml/badge.svg)](https://github.com/beam-bots/bb_camera/actions/workflows/ci.yml)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache--2.0-green.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Hex version badge](https://img.shields.io/hexpm/v/bb_camera.svg)](https://hex.pm/packages/bb_camera)
+[![Hexdocs badge](https://img.shields.io/badge/docs-hexdocs-purple)](https://hexdocs.pm/bb_camera)
+[![REUSE status](https://api.reuse.software/badge/github.com/beam-bots/bb_camera)](https://api.reuse.software/info/github.com/beam-bots/bb_camera)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/beam-bots/bb_camera)
 
 Camera support for [Beam Bots](https://github.com/beam-bots/bb): the
 `BB.Camera` behaviour, a bounded shared capture interface, and Membrane
