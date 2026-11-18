@@ -76,19 +76,10 @@ defmodule BB.Camera.Discovery do
 
   @doc """
   Whether `module` is a camera driver.
-
-  A driver carries several behaviours - `BB.Sensor` as well as `BB.Camera` -
-  and each is its own `behaviour` attribute, so this reads every one of them
-  rather than whichever happens to come first.
   """
   @spec camera?(module()) :: boolean()
-  def camera?(module) when is_atom(module) do
-    Code.ensure_loaded?(module) and
-      module.module_info(:attributes)
-      |> Keyword.get_values(:behaviour)
-      |> List.flatten()
-      |> Enum.member?(BB.Camera)
-  end
+  def camera?(module) when is_atom(module),
+    do: Spark.implements_behaviour?(module, BB.Camera)
 
   def camera?(_), do: false
 
