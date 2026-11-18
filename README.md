@@ -108,19 +108,19 @@ one synthesising frames all meet it identically.
 
 ## Installation
 
-This package is an unreleased spike and is not on Hex yet. Depend on a
-checkout:
+Add `bb_camera` to your dependencies:
 
 ```elixir
 def deps do
   [
-    {:bb, path: "../bb"},
-    {:bb_camera, path: "../bb_camera"}
+    {:bb, "~> 0.33"},
+    {:bb_camera, "~> 0.1"}
   ]
 end
 ```
 
-Once it is published, `{:bb_camera, "~> 0.1"}` will do instead.
+You will also want a driver. `BB.Camera.Synthetic` ships here and needs no
+hardware; `bb_camera_v4l` drives Linux V4L2 devices.
 
 ## Membrane is optional
 
@@ -139,8 +139,8 @@ If you want the source element, add all three lines:
 ```elixir
 def deps do
   [
-    {:bb, path: "../bb"},
-    {:bb_camera, path: "../bb_camera"},
+    {:bb, "~> 0.33"},
+    {:bb_camera, "~> 0.1"},
 
     {:membrane_core, "~> 1.3"},
     {:membrane_jpeg_format, "~> 0.1"},
