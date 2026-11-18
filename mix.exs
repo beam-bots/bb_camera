@@ -10,7 +10,7 @@ defmodule BB.Camera.MixProject do
   capture interface, and Membrane interoperability.
   """
 
-  @version "0.1.0"
+  @version "0.1.1"
 
   def project do
     [

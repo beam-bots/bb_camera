@@ -11,6 +11,15 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 <!-- changelog -->
 
+## [v0.1.1](https://github.com/beam-bots/bb_camera/compare/v0.1.0...v0.1.1) (2026-11-18)
+
+
+
+
+### Bug Fixes:
+
+* scope the `decimal` override to dev/test so the package can be built by James Harton
+
 ## [v0.1.0](https://github.com/beam-bots/bb_camera/compare/v0.1.0...v0.1.0) (2026-11-18)
 ### Breaking Changes:
 
