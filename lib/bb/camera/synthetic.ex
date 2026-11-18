@@ -64,6 +64,11 @@ defmodule BB.Camera.Synthetic do
         default: {:rate, 10},
         doc: "`{:rate, hertz}` to free-run, or `:external` to produce on demand"
       ],
+      telemetry_clock: [
+        type: {:or, [{:tuple, [{:in, [:rate]}, :any]}, {:in, [:external]}]},
+        default: {:rate, 1},
+        doc: "How often the hub publishes `BB.Message.Camera.CaptureState`"
+      ],
       frames: [
         type: {:list, :string},
         doc: "JPEG binaries to cycle through, instead of the built-in ones"
@@ -152,7 +157,12 @@ defmodule BB.Camera.Synthetic do
     {:ok, declared} = stream_info(Enum.to_list(opts))
     frames = Map.get(opts, :frames) || @builtin_frames
 
-    {:ok, hub} = Hub.start_link(bb: opts.bb, stream_info: declared)
+    {:ok, hub} =
+      Hub.start_link(
+        bb: opts.bb,
+        stream_info: declared,
+        telemetry_clock: opts.telemetry_clock
+      )
 
     {:ok,
      %{

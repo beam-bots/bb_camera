@@ -9,7 +9,7 @@ defmodule BB.Camera.HubTest do
   alias BB.Camera.{Frame, Hub, Media, StreamInfo, TestDriver}
   alias BB.Camera.TestBots.GatedCamera
   alias BB.Error.Hardware.Camera.CaptureFailed
-  alias BB.Message.Camera.{BeginCapture, EndCapture}
+  alias BB.Message.Camera.{BeginCapture, CaptureState, EndCapture}
 
   setup do
     start_supervised!(GatedCamera)
@@ -435,6 +435,110 @@ defmodule BB.Camera.HubTest do
 
     assert {:error, %{__struct__: BB.Error.State.Camera.NotCapturing}} =
              TestDriver.deliver(GatedCamera, :eye, "too-early")
+  end
+
+  describe "capture telemetry" do
+    setup do
+      {:ok, subscription} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+      {:ok, hub} = Camera.hub(GatedCamera, :eye)
+      BB.subscribe(GatedCamera, [:sensor, :head, :eye])
+
+      %{hub: hub, subscription: subscription}
+    end
+
+    test "a session's first window has no interval behind it", %{hub: hub} do
+      send(hub, {:tick, 1_000})
+
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
+      assert telemetry.measured_frame_rate == nil
+      assert telemetry.frames == 0
+    end
+
+    test "reports the frames per second the window actually carried", %{hub: hub} do
+      send(hub, {:tick, 0})
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{measured_frame_rate: nil}}}
+
+      for _ <- 1..30, do: :ok = TestDriver.deliver(GatedCamera, :eye)
+
+      send(hub, {:tick, 1_000_000_000})
+
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
+      assert telemetry.frames == 30
+      assert telemetry.measured_frame_rate == 30.0
+      assert telemetry.subscriber_count == 1
+    end
+
+    test "a stalled capture reports nothing rather than what it used to manage",
+         %{hub: hub} do
+      send(hub, {:tick, 0})
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{measured_frame_rate: nil}}}
+
+      for _ <- 1..10, do: :ok = TestDriver.deliver(GatedCamera, :eye)
+      send(hub, {:tick, 1_000_000_000})
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{measured_frame_rate: 10.0}}}
+
+      # No frames at all in the next window.
+      send(hub, {:tick, 2_000_000_000})
+
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
+      assert telemetry.frames == 0
+      assert telemetry.measured_frame_rate == 0.0
+    end
+
+    test "carries the rate the camera was asked for, as asked for" do
+      :ok =
+        TestDriver.confirm_start(
+          GatedCamera,
+          :eye,
+          StreamInfo.new!(format: :jpeg, width: 64, height: 48, frame_rate: 30.0)
+        )
+
+      {:ok, hub} = Camera.hub(GatedCamera, :eye)
+      send(hub, {:tick, 0})
+
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
+      assert telemetry.requested_frame_rate == 30.0
+    end
+
+    test "a frame carries both rates, so holding one is enough to compare them",
+         %{hub: hub, subscription: subscription} do
+      send(hub, {:tick, 0})
+      for _ <- 1..15, do: :ok = TestDriver.deliver(GatedCamera, :eye)
+      send(hub, {:tick, 1_000_000_000})
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{measured_frame_rate: 15.0}}}
+
+      ref = subscription.ref
+
+      # The hub holds the newest frame, so the first request is answered from
+      # the one delivered before the window closed - stamped with the rate as
+      # it stood then, which was nothing.
+      :ok = Camera.request(subscription)
+      assert_receive {:bb_camera, ^ref, %Frame{measured_frame_rate: nil}}
+
+      :ok = Camera.request(subscription)
+      :ok = TestDriver.deliver(GatedCamera, :eye)
+
+      assert_receive {:bb_camera, ^ref, %Frame{} = frame}
+      assert frame.measured_frame_rate == 15.0
+      assert frame.requested_frame_rate == nil
+    end
+
+    test "an idle camera publishes nothing, however often it is ticked",
+         %{hub: hub, subscription: subscription} do
+      :ok = Camera.unsubscribe(subscription)
+      assert_receive {:driver, :stop_capture}
+      :ok = TestDriver.confirm_stop(GatedCamera, :eye)
+      assert Hub.capture_state(hub) == :idle
+
+      send(hub, {:tick, 1_000_000_000})
+
+      # The tick has been through the hub by the time this call is answered, so
+      # there is nothing still in flight to wait for.
+      assert Hub.capture_state(hub) == :idle
+      refute_received {:bb, _, %BB.Message{payload: %CaptureState{}}}
+    end
   end
 
   describe "what reaches PubSub" do

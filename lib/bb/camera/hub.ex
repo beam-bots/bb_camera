@@ -57,6 +57,18 @@ defmodule BB.Camera.Hub do
   hub returns to `:idle`; a driver whose device is missing would otherwise be
   restarted in a tight loop for as long as anyone was watching.
 
+  ## How fast it is really going
+
+  Every frame passes through `deliver/2`, so the hub is the one place that can
+  measure a camera's real rate without each driver being asked to. While
+  capture is running it counts frames over a window and publishes
+  `BB.Message.Camera.CaptureState` at the end of each one, carrying what was
+  asked for alongside what the frames actually did. The same pair is stamped
+  onto every frame.
+
+  The window is counted, not smoothed, so a capture that has stalled reports
+  `0.0` rather than the rate it used to manage.
+
   ## Bounding what happens before the hub
 
   `deliver/2` bounds what crosses into `bb_camera`. It cannot bound what
@@ -81,7 +93,9 @@ defmodule BB.Camera.Hub do
   alias BB.Error.Invalid.Camera.StaleFrame
   alias BB.Error.State.Camera.NotCapturing
   alias BB.Message
-  alias BB.Message.Camera.{BeginCapture, EndCapture}
+  alias BB.Message.Camera.{BeginCapture, CaptureState, EndCapture}
+
+  @default_telemetry_rate 1.0
 
   @start_schema [
     bb: [
@@ -97,6 +111,15 @@ defmodule BB.Camera.Hub do
     driver: [
       type: :pid,
       doc: "The process to drive capture, defaults to the process calling `start_link/1`"
+    ],
+    telemetry_clock: [
+      type: :any,
+      doc: """
+      How often `BB.Message.Camera.CaptureState` is published, as a
+      `t:BB.Loop.clock/0`. Defaults to `{:rate, #{@default_telemetry_rate}}`.
+      `:external` publishes only when the hub is sent `{:tick, monotonic_ns}`,
+      which is how tests measure a window without waiting for one.
+      """
     ]
   ]
 
@@ -276,7 +299,11 @@ defmodule BB.Camera.Hub do
        latest: nil,
        last_sequence: nil,
        frame_count: 0,
-       subscribers: %{}
+       subscribers: %{},
+       telemetry_loop:
+         BB.Loop.new(bb, clock: opts[:telemetry_clock] || {:rate, @default_telemetry_rate}),
+       window_frames: 0,
+       measured_frame_rate: nil
      }}
   end
 
@@ -325,10 +352,21 @@ defmodule BB.Camera.Hub do
       when state.capture_state in [:capturing, :stopping] do
     case sequence_for(frame, state) do
       {:ok, sequence} ->
-        frame = %{frame | sequence: sequence}
+        frame = %{
+          frame
+          | sequence: sequence,
+            measured_frame_rate: state.measured_frame_rate,
+            requested_frame_rate: state.stream_info.frame_rate
+        }
 
         state =
-          %{state | latest: frame, last_sequence: sequence, frame_count: state.frame_count + 1}
+          %{
+            state
+            | latest: frame,
+              last_sequence: sequence,
+              frame_count: state.frame_count + 1,
+              window_frames: state.window_frames + 1
+          }
           |> serve_all()
 
         {:reply, :ok, state}
@@ -351,7 +389,10 @@ defmodule BB.Camera.Hub do
         frame_count: 0,
         last_sequence: nil,
         latest: nil,
-        subscribers: forget_sequences(state.subscribers)
+        subscribers: forget_sequences(state.subscribers),
+        telemetry_loop: BB.Loop.arm(state.telemetry_loop),
+        window_frames: 0,
+        measured_frame_rate: nil
     }
 
     publish(state, BeginCapture,
@@ -397,6 +438,16 @@ defmodule BB.Camera.Hub do
     |> then(&{:noreply, &1})
   end
 
+  def handle_info(:tick, state) do
+    {dt, _skipped, loop} = BB.Loop.tick(state.telemetry_loop)
+    {:noreply, close_window(%{state | telemetry_loop: loop}, dt)}
+  end
+
+  def handle_info({:tick, at_ns}, state) when is_integer(at_ns) do
+    {dt, _skipped, loop} = BB.Loop.observe(state.telemetry_loop, at_ns)
+    {:noreply, close_window(%{state | telemetry_loop: loop}, dt)}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   # ----------------------------------------------------------------------------
@@ -437,7 +488,10 @@ defmodule BB.Camera.Hub do
         stop_reason: nil,
         latest: nil,
         last_sequence: nil,
-        subscribers: end_session(state.subscribers)
+        subscribers: end_session(state.subscribers),
+        telemetry_loop: BB.Loop.cancel(state.telemetry_loop),
+        window_frames: 0,
+        measured_frame_rate: nil
     }
 
     if reason != :error and map_size(state.subscribers) > 0 do
@@ -573,6 +627,31 @@ defmodule BB.Camera.Hub do
         Process.demonitor(subscriber.monitor, [:flush])
         release_capture(state)
     end
+  end
+
+  # ----------------------------------------------------------------------------
+  # Capture telemetry
+  # ----------------------------------------------------------------------------
+
+  # The rate is counted over the window rather than smoothed across the
+  # session, so a capture that has stalled reports 0.0 rather than whatever it
+  # last managed. A tick with no interval behind it - the first of a session -
+  # has nothing to divide by and says so.
+  defp close_window(%{capture_state: capture_state} = state, _dt)
+       when capture_state not in [:capturing, :stopping],
+       do: state
+
+  defp close_window(state, dt) do
+    measured = if dt && dt > 0, do: state.window_frames / dt
+
+    publish(state, CaptureState,
+      frames: state.window_frames,
+      measured_frame_rate: measured,
+      requested_frame_rate: state.stream_info.frame_rate,
+      subscriber_count: map_size(state.subscribers)
+    )
+
+    %{state | window_frames: 0, measured_frame_rate: measured}
   end
 
   # ----------------------------------------------------------------------------

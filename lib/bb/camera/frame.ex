@@ -41,6 +41,19 @@ defmodule BB.Camera.Frame do
   started, so a driver may restart its count at zero for each session or carry
   a single counter across restarts - whichever its capture backend makes
   natural. Neither is more correct, and the hub accepts both.
+
+  ## Frame rates
+
+  `requested_frame_rate` is what the camera was asked for, and
+  `measured_frame_rate` is what the frames before this one actually did, over
+  the most recent window the hub measured. Both are stamped by the hub, so a
+  driver sets neither; both can be `nil`, the first if the camera never said
+  what it was asking for and the second until a window has closed.
+
+  They are named fields rather than `metadata` keys because every frame has
+  them whatever the driver is. `metadata` is for what only some drivers know -
+  a JPEG's component count, say - and nothing should go in it that the
+  framework puts on every frame.
   """
 
   alias BB.Camera.Format
@@ -53,6 +66,8 @@ defmodule BB.Camera.Frame do
     :sequence,
     :monotonic_time,
     :wall_time,
+    :measured_frame_rate,
+    :requested_frame_rate,
     metadata: %{}
   ]
 
@@ -64,6 +79,8 @@ defmodule BB.Camera.Frame do
           sequence: non_neg_integer() | nil,
           monotonic_time: integer(),
           wall_time: integer(),
+          measured_frame_rate: float() | nil,
+          requested_frame_rate: float() | nil,
           metadata: map()
         }
 
@@ -86,7 +103,21 @@ defmodule BB.Camera.Frame do
       doc: "Capture time from `System.monotonic_time(:nanosecond)`"
     ],
     wall_time: [type: :integer, doc: "Capture time from `System.system_time(:nanosecond)`"],
-    metadata: [type: :map, default: %{}, doc: "Driver-specific extras"]
+    measured_frame_rate: [
+      type: {:or, [:float, nil]},
+      default: nil,
+      doc: "Frames per second the stream was running at; stamped by the hub"
+    ],
+    requested_frame_rate: [
+      type: {:or, [:float, nil]},
+      default: nil,
+      doc: "Frames per second the camera was asked for; stamped by the hub"
+    ],
+    metadata: [
+      type: :map,
+      default: %{},
+      doc: "Format-specific extras, such as a JPEG's component count"
+    ]
   ]
 
   @doc """
