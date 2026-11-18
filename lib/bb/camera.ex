@@ -23,8 +23,8 @@ defmodule BB.Camera do
   out. Cameras cannot: a 1080p MJPEG stream is tens of megabytes a second, and
   a fan-out registry with no backpressure turns one slow subscriber into an
   unbounded mailbox. So `BB.PubSub` carries camera *lifecycle* only - capture
-  started and ended, settings applied and rejected - and frames travel over the
-  bounded interface `BB.Camera.Hub` serves.
+  started and ended - and frames travel over the bounded interface
+  `BB.Camera.Hub` serves.
 
   The split is not an optimisation. It is what lets a robot keep running when a
   consumer stalls.
@@ -56,8 +56,8 @@ defmodule BB.Camera do
 
   ## Writing a driver
 
-  One module, `use BB.Sensor` and `use BB.Camera`. Two callbacks of your own,
-  then three messages from the hub to answer. `BB.Camera.Synthetic` is a
+  One module, `use BB.Sensor` and `use BB.Camera`. One callback of your own,
+  then two messages from the hub to answer. `BB.Camera.Synthetic` is a
   complete worked example; the short version is:
 
       defmodule MyCamera do
@@ -79,15 +79,20 @@ defmodule BB.Camera do
         @impl BB.Sensor
         def handle_info({:bb_camera, :start_capture}, state), do: ...
         def handle_info({:bb_camera, :stop_capture}, state), do: ...
-        def handle_info({:bb_camera, {:put_settings, settings, ref}}, state), do: ...
       end
+
+  A camera is configured like any other component: through its
+  `c:BB.Sensor.options_schema/0`, which the robot's DSL can fill from
+  parameters with `param/1`. Changing one of those parameters at runtime
+  re-validates the options and calls `c:BB.Sensor.handle_options/2`, which is
+  where a driver reconfigures the device.
 
   Nothing in this interface assumes where frames come from. A driver reading a
   device through a subprocess, one calling a platform capture API from a NIF,
   and one synthesising frames all meet it identically.
   """
 
-  alias BB.Camera.{Discovery, Format, Hub, Info, Settings, StreamInfo, Subscription}
+  alias BB.Camera.{Discovery, Format, Hub, Info, StreamInfo, Subscription}
   alias BB.Error.Invalid.Camera.UnknownCamera
   alias BB.Error.State.Camera.NotRunning
 
@@ -113,23 +118,10 @@ defmodule BB.Camera do
   """
   @callback stream_info(opts :: keyword()) :: {:ok, StreamInfo.t()} | {:error, struct()}
 
-  @doc """
-  The settings this camera accepts, as a `Spark.Options` schema.
-
-  Defaults to accepting nothing. Settings are validated against this before the
-  driver is asked to apply them, so an invalid set never reaches hardware.
-  """
-  @callback settings_schema() :: Spark.Options.t()
-
   @doc false
   defmacro __using__(_opts) do
     quote do
       @behaviour BB.Camera
-
-      @impl BB.Camera
-      def settings_schema, do: Spark.Options.new!([])
-
-      defoverridable settings_schema: 0
     end
   end
 
@@ -280,37 +272,6 @@ defmodule BB.Camera do
   catch
     :exit, {reason, _} when reason in [:noproc, :normal, :shutdown, :killed] ->
       {:error, NotRunning.exception(robot: subscription.robot, camera: subscription.camera)}
-  end
-
-  # ----------------------------------------------------------------------------
-  # Settings
-  # ----------------------------------------------------------------------------
-
-  @doc """
-  A running camera's settings, with the provenance of each value.
-  """
-  @spec settings(module(), atom()) :: {:ok, Settings.t()} | {:error, struct()}
-  def settings(robot, camera) do
-    with {:ok, hub} <- hub(robot, camera), do: {:ok, Hub.settings(hub)}
-  end
-
-  @doc """
-  Change a camera's settings, waiting for the driver to report the outcome.
-
-  The given settings are a patch: they are merged over the camera's current
-  values before validation, so changing one setting cannot reset another to its
-  schema default. The driver is handed the complete resulting set.
-
-  Returns the camera's full settings on success, including whatever the driver
-  was able to verify. A driver that doesn't answer within `timeout` gets its
-  request abandoned rather than left pending forever.
-  """
-  @spec put_settings(module(), atom(), keyword() | map(), timeout()) ::
-          {:ok, Settings.t()} | {:error, struct()}
-  def put_settings(robot, camera, settings, timeout \\ 5000) do
-    with {:ok, hub} <- hub(robot, camera) do
-      Hub.put_settings(hub, Map.new(settings), timeout)
-    end
   end
 
   # ----------------------------------------------------------------------------

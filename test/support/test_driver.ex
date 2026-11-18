@@ -34,7 +34,7 @@ defmodule BB.Camera.TestDriver do
 
   use BB.Camera
 
-  alias BB.Camera.{Frame, Hub, Settings, StreamInfo}
+  alias BB.Camera.{Frame, Hub, StreamInfo}
 
   @impl BB.Camera
   def stream_info(opts) do
@@ -45,28 +45,13 @@ defmodule BB.Camera.TestDriver do
     )
   end
 
-  @impl BB.Camera
-  def settings_schema do
-    Spark.Options.new!(
-      brightness: [type: :integer, default: 50],
-      contrast: [type: :integer, default: 10]
-    )
-  end
-
   @impl BB.Sensor
   def init(opts) do
     opts = Map.new(opts)
     {:ok, info} = stream_info(Enum.to_list(opts))
+    {:ok, hub} = Hub.start_link(bb: opts.bb, stream_info: info)
 
-    {:ok, hub} =
-      Hub.start_link(
-        bb: opts.bb,
-        stream_info: info,
-        settings: Settings.new(%{brightness: 50, contrast: 10}),
-        settings_schema: settings_schema()
-      )
-
-    {:ok, %{bb: opts.bb, hub: hub, reporter: nil, sequence: 0, settings_ref: nil}}
+    {:ok, %{bb: opts.bb, hub: hub, reporter: nil, sequence: 0}}
   end
 
   # Everything the hub asks for is reported, never acted on.
@@ -79,11 +64,6 @@ defmodule BB.Camera.TestDriver do
   def handle_info({:bb_camera, :stop_capture}, state) do
     report(state, :stop_capture)
     {:noreply, state}
-  end
-
-  def handle_info({:bb_camera, {:put_settings, settings, ref}}, state) do
-    report(state, {:put_settings, settings})
-    {:noreply, %{state | settings_ref: ref}}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -107,14 +87,6 @@ defmodule BB.Camera.TestDriver do
 
   def handle_call({:test, :update_stream_info, stream_info}, _from, state) do
     {:reply, Hub.update_stream_info(state.hub, stream_info), state}
-  end
-
-  def handle_call({:test, :settings_result, result}, _from, state) do
-    {:reply, Hub.settings_result(state.hub, state.settings_ref, result), state}
-  end
-
-  def handle_call({:test, :update_settings, settings}, _from, state) do
-    {:reply, Hub.update_settings(state.hub, settings), state}
   end
 
   def handle_call({:test, :deliver, data}, _from, state) do
@@ -160,14 +132,6 @@ defmodule BB.Camera.TestDriver do
   @doc "Report a new live format."
   def update_stream_info(robot, camera, stream_info),
     do: call(robot, camera, {:test, :update_stream_info, stream_info})
-
-  @doc "Answer a pending settings change."
-  def settings_result(robot, camera, result),
-    do: call(robot, camera, {:test, :settings_result, result})
-
-  @doc "Report settings nobody asked for."
-  def update_settings(robot, camera, settings),
-    do: call(robot, camera, {:test, :update_settings, settings})
 
   @doc "Hand a frame to the hub, with an auto-incrementing sequence."
   def deliver(robot, camera, data \\ "jpeg"), do: call(robot, camera, {:test, :deliver, data})

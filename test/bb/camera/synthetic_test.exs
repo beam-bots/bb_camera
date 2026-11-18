@@ -7,7 +7,6 @@ defmodule BB.Camera.SyntheticTest do
 
   alias BB.Camera
   alias BB.Camera.{Frame, Media, Synthetic}
-  alias BB.Camera.Settings
   alias BB.Camera.TestBots.{FailingCamera, FreeRunningCamera, MixedTopology, SingleCamera}
   alias BB.Message.Camera.{BeginCapture, EndCapture}
 
@@ -135,27 +134,6 @@ defmodule BB.Camera.SyntheticTest do
 
       Media.close(session)
       assert_receive {:bb, _, %BB.Message{payload: %EndCapture{reason: :no_subscribers}}}
-    end
-  end
-
-  describe "settings" do
-    setup do
-      start_supervised!(SingleCamera)
-      {:ok, session} = Media.open(SingleCamera, :eye)
-      on_exit(fn -> Media.close(session) end)
-      :ok
-    end
-
-    test "round-trips a change through the driver" do
-      assert {:ok, settings} = Camera.put_settings(SingleCamera, :eye, %{brightness: 90})
-
-      assert Settings.get(settings, :brightness) == 90
-      assert Settings.actual?(settings, :brightness)
-    end
-
-    test "a setting outside the schema is refused before the driver sees it" do
-      assert {:error, error} = Camera.put_settings(SingleCamera, :eye, %{nonsense: 1})
-      assert error.__struct__ == BB.Error.Invalid.Camera.InvalidSettings
     end
   end
 end

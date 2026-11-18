@@ -6,10 +6,10 @@ defmodule BB.Camera.HubTest do
   use ExUnit.Case, async: false
 
   alias BB.Camera
-  alias BB.Camera.{Frame, Hub, Media, Settings, StreamInfo, TestDriver}
+  alias BB.Camera.{Frame, Hub, Media, StreamInfo, TestDriver}
   alias BB.Camera.TestBots.GatedCamera
   alias BB.Error.Hardware.Camera.CaptureFailed
-  alias BB.Message.Camera.{ApplySettings, BeginCapture, EndCapture, RejectSettings}
+  alias BB.Message.Camera.{BeginCapture, EndCapture}
 
   setup do
     start_supervised!(GatedCamera)
@@ -435,102 +435,6 @@ defmodule BB.Camera.HubTest do
 
     assert {:error, %{__struct__: BB.Error.State.Camera.NotCapturing}} =
              TestDriver.deliver(GatedCamera, :eye, "too-early")
-  end
-
-  describe "settings" do
-    setup do
-      {:ok, subscription} = Camera.subscribe(GatedCamera, :eye)
-      assert_receive {:driver, :start_capture}
-      :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      %{subscription: subscription}
-    end
-
-    test "changing one setting doesn't reset the others to their schema defaults" do
-      task =
-        Task.async(fn -> Camera.put_settings(GatedCamera, :eye, %{brightness: 90}) end)
-
-      assert_receive {:driver, {:put_settings, settings}}
-
-      assert settings == %{brightness: 90, contrast: 10}
-
-      :ok = TestDriver.settings_result(GatedCamera, :eye, {:ok, Settings.new(settings)})
-      assert {:ok, applied} = Task.await(task)
-      assert Settings.get(applied, :contrast) == 10
-    end
-
-    test "an applied change is published with just what moved" do
-      BB.subscribe(GatedCamera, [:sensor, :head, :eye])
-
-      task = Task.async(fn -> Camera.put_settings(GatedCamera, :eye, %{brightness: 90}) end)
-      assert_receive {:driver, {:put_settings, settings}}
-      :ok = TestDriver.settings_result(GatedCamera, :eye, {:ok, Settings.new(settings)})
-      {:ok, _} = Task.await(task)
-
-      assert_receive {:bb, _, %BB.Message{payload: %ApplySettings{changed: changed}}}
-      assert changed == %{brightness: 90}
-    end
-
-    test "settings outside the driver's schema never reach the driver" do
-      BB.subscribe(GatedCamera, [:sensor, :head, :eye])
-
-      assert {:error, error} = Camera.put_settings(GatedCamera, :eye, %{nonsense: true})
-      assert error.camera == :eye
-
-      refute_received {:driver, {:put_settings, _}}
-      assert_receive {:bb, _, %BB.Message{payload: %RejectSettings{}}}
-    end
-
-    test "a driver that never answers doesn't leave the request pending forever" do
-      assert {:error, error} = Camera.put_settings(GatedCamera, :eye, %{brightness: 90}, 100)
-      assert error.camera == :eye
-
-      # The abandoned request is gone: answering it now changes nothing, and a
-      # fresh request still works.
-      :ok = TestDriver.settings_result(GatedCamera, :eye, {:ok, Settings.new(%{brightness: 90})})
-
-      task = Task.async(fn -> Camera.put_settings(GatedCamera, :eye, %{contrast: 20}) end)
-
-      # Match on the new request specifically: the abandoned one was reported
-      # too, and is still sitting in this process's mailbox.
-      assert_receive {:driver, {:put_settings, %{contrast: 20}}}
-
-      :ok = TestDriver.settings_result(GatedCamera, :eye, {:ok, Settings.new(%{contrast: 20})})
-      assert {:ok, _} = Task.await(task)
-    end
-  end
-
-  describe "driver-initiated settings" do
-    setup do
-      {:ok, subscription} = Camera.subscribe(GatedCamera, :eye)
-      assert_receive {:driver, :start_capture}
-      :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      %{subscription: subscription}
-    end
-
-    test "a driver can report a value nobody asked it to change" do
-      BB.subscribe(GatedCamera, [:sensor, :head, :eye])
-
-      :ok = TestDriver.update_settings(GatedCamera, :eye, Settings.new(%{brightness: 75}))
-
-      assert_receive {:bb, _, %BB.Message{payload: %ApplySettings{changed: %{brightness: 75}}}}
-      assert {:ok, settings} = Camera.settings(GatedCamera, :eye)
-      assert Settings.get(settings, :brightness) == 75
-    end
-
-    test "a measurement alone is recorded without announcing a change" do
-      BB.subscribe(GatedCamera, [:sensor, :head, :eye])
-
-      measured = Settings.measure(Settings.new(%{}), :frame_rate, 28.7)
-      :ok = TestDriver.update_settings(GatedCamera, :eye, measured)
-
-      assert {:ok, settings} = Camera.settings(GatedCamera, :eye)
-      assert settings.measured.frame_rate == 28.7
-
-      # The settings didn't change, so nothing was published. The synchronous
-      # read above has already been through the hub, so there is nothing still
-      # in flight to wait for.
-      refute_received {:bb, _, %BB.Message{payload: %ApplySettings{}}}
-    end
   end
 
   describe "what reaches PubSub" do

@@ -47,32 +47,13 @@ at runtime (below). If the options genuinely can't imply a format, return
 `{:error, %BB.Error.Invalid.Camera.UnknownStreamInfo{}}` and discovery will
 report `stream_info: nil` rather than inventing one.
 
-### `settings_schema/0` — optional
-
-```elixir
-@impl BB.Camera
-def settings_schema do
-  Spark.Options.new!(frame_rate: [type: :float, default: 30.0])
-end
-```
-
-Settings are validated against this before you are asked to apply them, so an
-invalid set never reaches your hardware. Defaults to accepting nothing.
-
 ## Starting the hub
 
 ```elixir
 @impl BB.Sensor
 def init(opts) do
   {:ok, declared} = stream_info(opts)
-
-  {:ok, hub} =
-    BB.Camera.Hub.start_link(
-      bb: opts[:bb],
-      stream_info: declared,
-      settings: BB.Camera.Settings.new(%{frame_rate: 30.0}),
-      settings_schema: settings_schema()
-    )
+  {:ok, hub} = BB.Camera.Hub.start_link(bb: opts[:bb], stream_info: declared)
 
   {:ok, %{bb: opts[:bb], hub: hub, capture: nil}}
 end
@@ -82,7 +63,7 @@ The hub registers itself in the robot's registry — you don't do that. It links
 to you, so you fail together, and monitors you, which catches the clean exit a
 link wouldn't propagate.
 
-## Three messages to answer
+## Two messages to answer
 
 ### Starting
 
@@ -128,21 +109,33 @@ end
 You are asked to stop when the last consumer leaves. You don't need to work out
 why — when the hub asked, it uses its own reason for the published event.
 
-### Settings
+## Reconfiguring at runtime
+
+A camera is configured like every other component: through
+`c:BB.Sensor.options_schema/0`. A robot can fill any of those options from a
+parameter, and changing it at runtime re-validates the options against your
+schema and calls your `c:BB.Sensor.handle_options/2`:
 
 ```elixir
-def handle_info({:bb_camera, {:put_settings, settings, ref}}, state) do
-  BB.Camera.Hub.settings_result(state.hub, ref, apply_settings(settings, state))
-  {:noreply, state}
+topology do
+  link :head do
+    sensor :eye, {MyCamera, device: "/dev/video0", width: param([:camera, :width])}
+  end
 end
 ```
 
-`settings` is the complete resulting set, not just the keys that changed — the
-hub merges a caller's patch over the current values first, so a change to one
-setting can't reset another to its schema default.
+```elixir
+@impl BB.Sensor
+def handle_options(new_opts, state) do
+  {:ok, reopen_device(state, new_opts)}
+end
+```
 
-To report something nobody asked for — a value the device changed underneath
-you, or a frame rate you measured — use `BB.Camera.Hub.update_settings/2`.
+If the new geometry differs from what you declared, tell the hub with
+`BB.Camera.Hub.update_stream_info/2` so consumers hear about it before the
+first frame it describes.
+
+There is no camera-specific settings channel. One schema, one way to change it.
 
 ## Delivering frames
 

@@ -77,12 +77,11 @@ defmodule BB.Camera.Hub do
 
   use GenServer
 
-  alias BB.Camera.{Format, Frame, Settings, StreamInfo}
-  alias BB.Error.Hardware.Camera.SettingsFailed
-  alias BB.Error.Invalid.Camera.{InvalidSettings, StaleFrame}
+  alias BB.Camera.{Format, Frame, StreamInfo}
+  alias BB.Error.Invalid.Camera.StaleFrame
   alias BB.Error.State.Camera.NotCapturing
   alias BB.Message
-  alias BB.Message.Camera.{ApplySettings, BeginCapture, EndCapture, RejectSettings}
+  alias BB.Message.Camera.{BeginCapture, EndCapture}
 
   @start_schema [
     bb: [
@@ -94,14 +93,6 @@ defmodule BB.Camera.Hub do
       type: {:struct, StreamInfo},
       required: true,
       doc: "What the camera is expected to produce"
-    ],
-    settings: [
-      type: {:struct, Settings},
-      doc: "Initial settings, defaults to empty"
-    ],
-    settings_schema: [
-      type: :any,
-      doc: "A `Spark.Options` schema the driver's settings are validated against"
     ],
     driver: [
       type: :pid,
@@ -207,7 +198,7 @@ defmodule BB.Camera.Hub do
   Replace the live stream format.
 
   Call it when the first real frame reveals the actual geometry, or when a
-  settings change alters it. Each subscriber is told as
+  change to the camera's options alters it. Each subscriber is told as
   `{:bb_camera, ref, {:stream_info, info}}` immediately before the first frame
   the new format describes.
 
@@ -219,38 +210,6 @@ defmodule BB.Camera.Hub do
   @spec update_stream_info(GenServer.server(), StreamInfo.t()) :: :ok
   def update_stream_info(hub, %StreamInfo{} = stream_info) do
     GenServer.call(hub, {:update_stream_info, stream_info})
-  end
-
-  @doc """
-  Report settings the hub didn't ask for.
-
-  `settings_result/3` only exists in answer to a `put_settings` request, which
-  leaves a driver no way to report something it learned on its own - a frame
-  rate measured from the intervals between frames, or a value the device
-  changed underneath it. This is that way.
-
-  A change to `values` is a change to the camera's settings and publishes
-  `BB.Message.Camera.ApplySettings`. An update that only adds measurements is
-  stored silently: a driver averaging its frame rate over a sliding window
-  would otherwise publish an event every frame, and a measurement is an
-  observation about a setting rather than a change to one.
-  """
-  @spec update_settings(GenServer.server(), Settings.t()) :: :ok
-  def update_settings(hub, %Settings{} = settings) do
-    GenServer.call(hub, {:update_settings, settings})
-  end
-
-  @doc """
-  Report the outcome of a settings change the hub asked for.
-
-  `ref` is the one handed to the driver in
-  `{:bb_camera, {:put_settings, settings, ref}}`. A result for a request that
-  has already timed out is discarded.
-  """
-  @spec settings_result(GenServer.server(), reference(), {:ok, Settings.t()} | {:error, term()}) ::
-          :ok
-  def settings_result(hub, ref, result) do
-    GenServer.call(hub, {:settings_result, ref, result})
   end
 
   @doc """
@@ -287,23 +246,6 @@ defmodule BB.Camera.Hub do
   def unsubscribe(hub, ref), do: GenServer.call(hub, {:unsubscribe, ref})
 
   @doc false
-  @spec settings(GenServer.server()) :: Settings.t()
-  def settings(hub), do: GenServer.call(hub, :settings)
-
-  @doc false
-  @spec put_settings(GenServer.server(), map(), timeout()) ::
-          {:ok, Settings.t()} | {:error, struct()}
-  def put_settings(hub, settings, timeout) do
-    GenServer.call(hub, {:put_settings, settings, timeout}, call_timeout(timeout))
-  end
-
-  # The hub abandons an unanswered settings request at `timeout`. The caller
-  # waits a little longer so that abandonment arrives as a reply it can report,
-  # rather than as a `GenServer.call` exit racing it.
-  defp call_timeout(:infinity), do: :infinity
-  defp call_timeout(timeout), do: timeout + 250
-
-  @doc false
   @spec stream_info(GenServer.server()) :: StreamInfo.t()
   def stream_info(hub), do: GenServer.call(hub, :stream_info)
 
@@ -329,15 +271,12 @@ defmodule BB.Camera.Hub do
        driver_monitor: Process.monitor(driver),
        stream_info: opts[:stream_info],
        stream_info_generation: 0,
-       settings: opts[:settings] || Settings.new(),
-       settings_schema: opts[:settings_schema] || Spark.Options.new!([]),
        capture_state: :idle,
        stop_reason: nil,
        latest: nil,
        last_sequence: nil,
        frame_count: 0,
-       subscribers: %{},
-       pending_settings: %{}
+       subscribers: %{}
      }}
   end
 
@@ -435,52 +374,6 @@ defmodule BB.Camera.Hub do
     {:reply, :ok, replace_stream_info(state, stream_info)}
   end
 
-  def handle_call({:update_settings, settings}, _from, state) do
-    changed = Settings.changed(state.settings, settings)
-
-    if map_size(changed) > 0 do
-      publish(state, ApplySettings, settings: settings, changed: changed)
-    end
-
-    {:reply, :ok, %{state | settings: Settings.merge(state.settings, settings)}}
-  end
-
-  def handle_call({:settings_result, ref, result}, _from, state) do
-    {entry, state} = pop_in(state.pending_settings[ref])
-    {:reply, :ok, resolve_settings(state, entry, result)}
-  end
-
-  def handle_call({:put_settings, settings, timeout}, from, state) do
-    requested = Map.merge(state.settings.values, Map.new(settings))
-
-    case Spark.Options.validate(Enum.to_list(requested), state.settings_schema) do
-      {:ok, validated} ->
-        ref = make_ref()
-        resolved = Map.new(validated)
-
-        entry = %{
-          from: from,
-          requested: resolved,
-          timer: Process.send_after(self(), {:settings_timeout, ref}, settings_timer(timeout))
-        }
-
-        send(state.driver, {:bb_camera, {:put_settings, resolved, ref}})
-        {:noreply, put_in(state.pending_settings[ref], entry)}
-
-      {:error, reason} ->
-        error =
-          InvalidSettings.exception(
-            camera: state.camera,
-            settings: Map.new(settings),
-            reason: Exception.message(reason)
-          )
-
-        publish(state, RejectSettings, settings: Map.new(settings), error: error)
-        {:reply, {:error, error}, state}
-    end
-  end
-
-  def handle_call(:settings, _from, state), do: {:reply, state.settings, state}
   def handle_call(:stream_info, _from, state), do: {:reply, state.stream_info, state}
   def handle_call(:capture_state, _from, state), do: {:reply, state.capture_state, state}
 
@@ -502,15 +395,6 @@ defmodule BB.Camera.Hub do
     |> Enum.filter(fn {_ref, subscriber} -> subscriber.pid == pid end)
     |> Enum.reduce(state, fn {ref, _}, state -> drop_subscriber(state, ref) end)
     |> then(&{:noreply, &1})
-  end
-
-  def handle_info({:settings_timeout, ref}, state) do
-    {entry, state} = pop_in(state.pending_settings[ref])
-
-    error =
-      SettingsFailed.exception(camera: state.camera, reason: "the driver did not respond in time")
-
-    {:noreply, resolve_settings(state, entry, {:error, error}, cancel_timer?: false)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -690,41 +574,6 @@ defmodule BB.Camera.Hub do
         release_capture(state)
     end
   end
-
-  # ----------------------------------------------------------------------------
-  # Settings
-  # ----------------------------------------------------------------------------
-
-  defp settings_timer(:infinity), do: 60_000
-  defp settings_timer(timeout), do: timeout
-
-  defp resolve_settings(state, entry, result, opts \\ [])
-
-  defp resolve_settings(state, nil, _result, _opts), do: state
-
-  defp resolve_settings(state, entry, result, opts) do
-    if Keyword.get(opts, :cancel_timer?, true), do: Process.cancel_timer(entry.timer)
-    apply_settings_result(state, entry, result)
-  end
-
-  defp apply_settings_result(state, entry, {:ok, %Settings{} = settings}) do
-    changed = Settings.changed(state.settings, settings)
-    publish(state, ApplySettings, settings: settings, changed: changed)
-    GenServer.reply(entry.from, {:ok, settings})
-    %{state | settings: settings}
-  end
-
-  defp apply_settings_result(state, entry, {:error, reason}) do
-    error = normalise_settings_error(state, reason)
-    publish(state, RejectSettings, settings: entry.requested, error: error)
-    GenServer.reply(entry.from, {:error, error})
-    state
-  end
-
-  defp normalise_settings_error(_state, %{__struct__: _} = error), do: error
-
-  defp normalise_settings_error(state, reason),
-    do: SettingsFailed.exception(camera: state.camera, reason: reason)
 
   # ----------------------------------------------------------------------------
   # PubSub

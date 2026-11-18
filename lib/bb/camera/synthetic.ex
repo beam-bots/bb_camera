@@ -77,7 +77,7 @@ defmodule BB.Camera.Synthetic do
 
   use BB.Camera
 
-  alias BB.Camera.{Frame, Hub, Settings, StreamInfo}
+  alias BB.Camera.{Frame, Hub, StreamInfo}
   alias BB.Error.Hardware.Camera.CaptureFailed
   alias BB.Robot.Units
 
@@ -146,26 +146,13 @@ defmodule BB.Camera.Synthetic do
     )
   end
 
-  @impl BB.Camera
-  def settings_schema do
-    Spark.Options.new!(
-      brightness: [type: :integer, default: 50, doc: "A setting that exists to be changed"]
-    )
-  end
-
   @impl BB.Sensor
   def init(opts) do
     opts = Map.new(opts)
     {:ok, declared} = stream_info(Enum.to_list(opts))
     frames = Map.get(opts, :frames) || @builtin_frames
 
-    {:ok, hub} =
-      Hub.start_link(
-        bb: opts.bb,
-        stream_info: declared,
-        settings: Settings.new(%{brightness: 50}),
-        settings_schema: settings_schema()
-      )
+    {:ok, hub} = Hub.start_link(bb: opts.bb, stream_info: declared)
 
     {:ok,
      %{
@@ -199,16 +186,6 @@ defmodule BB.Camera.Synthetic do
   def handle_info({:bb_camera, :stop_capture}, state) do
     state = %{state | capturing?: false, loop: BB.Loop.cancel(state.loop)}
     Hub.capture_stopped(state.hub, :no_subscribers)
-    {:noreply, state}
-  end
-
-  def handle_info({:bb_camera, {:put_settings, settings, ref}}, state) do
-    applied =
-      settings
-      |> Settings.new()
-      |> Settings.put(:brightness, settings[:brightness], :actual)
-
-    Hub.settings_result(state.hub, ref, {:ok, applied})
     {:noreply, state}
   end
 

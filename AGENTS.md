@@ -23,10 +23,10 @@ HTTP transport or UI (`bb_liveview` and `bb_kino` do), and it does not modify
 ## The one invariant
 
 **No frame bytes on `BB.PubSub`, ever.** Not in events, not in errors, not in
-metadata. PubSub carries capture and settings lifecycle only. A frame on a
-fan-out registry has no backpressure behind it, and one slow subscriber is
-enough to take a node down. `test/bb/camera/hub_test.exs` asserts this
-directly; if a change makes that test awkward, the change is wrong.
+metadata. PubSub carries capture lifecycle only. A frame on a fan-out registry
+has no backpressure behind it, and one slow subscriber is enough to take a node
+down. `test/bb/camera/hub_test.exs` asserts this directly; if a change makes
+that test awkward, the change is wrong.
 
 ## Design decisions worth not re-litigating
 
@@ -59,6 +59,19 @@ directly; if a change makes that test awkward, the change is wrong.
   instead re-offers its outstanding demand, which the hub has just spent.
 - **`c:BB.Camera.stream_info/1` must be pure.** Discovery calls it on robots
   that aren't running.
+- **A camera is configured through `c:BB.Sensor.options_schema/0` and nothing
+  else.** There was briefly a second channel — a `settings_schema/0` callback,
+  a `put_settings` round trip, `ApplySettings`/`RejectSettings` and a
+  provenance-carrying `Settings` struct — and it was deleted. It duplicated
+  what the parameter system already does: in `bb_camera_v4l` its schema held
+  `width`, `height` and `frame_rate`, the same three keys as that driver's
+  options. Options can be filled from parameters with `param/1`, are validated
+  on every change, and are persisted by a `BB.Parameter.Store`; settings were
+  none of those. Reconfigure in `c:BB.Sensor.handle_options/2`. Do not
+  reintroduce a camera-specific configuration path.
+- **What the camera actually produces is `StreamInfo`, not a setting.** A
+  driver reports negotiated geometry with `Hub.update_stream_info/2`, which is
+  the honest channel for "what I got" as distinct from "what I asked for".
 - **`BB.Camera.Info` carries no driver options**, so device paths and
   credentials can't reach a UI through discovery.
 - **Interframe formats are refused, not dropped.** See `BB.Camera.Format`.

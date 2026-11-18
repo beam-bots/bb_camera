@@ -30,10 +30,10 @@ out. Cameras can't: a 1080p MJPEG stream is tens of megabytes a second, and a
 fan-out registry with no backpressure turns one slow subscriber into an
 unbounded mailbox and then into a dead node.
 
-So `BB.PubSub` carries camera *lifecycle* only — capture started and ended,
-settings applied and rejected — and frames travel over a bounded interface
-served by one `BB.Camera.Hub` per camera. The split isn't an optimisation; it
-is what lets a robot keep running when a consumer stalls.
+So `BB.PubSub` carries camera *lifecycle* only — capture started and ended —
+and frames travel over a bounded interface served by one `BB.Camera.Hub` per
+camera. The split isn't an optimisation; it is what lets a robot keep running
+when a consumer stalls.
 
 The hub is bounded at both ends. A driver hands frames over with a synchronous
 call, so one frame per driver is ever in flight. The hub keeps exactly one
