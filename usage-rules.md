@@ -4,15 +4,67 @@ SPDX-FileCopyrightText: 2026 James Harton
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# bb_camera usage rules
+# bb_camera Usage Rules
 
-## Never publish frames
+`bb_camera` provides camera support for [Beam Bots](https://hexdocs.pm/bb): the
+`BB.Camera` behaviour, the bounded shared capture interface `BB.Camera.Hub`,
+discovery, the `BB.Message.Camera.*` payloads, a no-hardware driver
+(`BB.Camera.Synthetic`) and a Membrane source. Hardware drivers live elsewhere
+(`bb_camera_v4l` and friends). For BB framework basics, see `bb`'s rules
+(`mix usage_rules.sync <file> bb:all`); this file covers only what's specific to
+cameras.
 
-`BB.PubSub` carries camera lifecycle only: `BB.Message.Camera.BeginCapture`,
-`EndCapture`, `ApplySettings`, `RejectSettings`. Frame bytes go over
-`BB.Camera.Hub` and nowhere else, including inside error payloads. A frame on a
-fan-out registry has no backpressure behind it, and one slow subscriber is
-enough to take the node down.
+## Core principles
+
+1. **Frames never go on `BB.PubSub`.** It carries capture lifecycle
+   (`BB.Message.Camera.BeginCapture`, `EndCapture`) and periodic telemetry
+   (`CaptureState`), and nothing else — not in events, not in errors, not in
+   metadata. A frame on a fan-out registry has no backpressure behind it, and
+   one slow subscriber is enough to take the node down.
+2. **A request yields exactly one frame, strictly newer than your last.** You
+   cannot re-read the current frame. That is what stops a `next`-in-a-loop
+   consumer spinning at CPU speed instead of capture rate.
+3. **Capture is driver-confirmed and shared.** The hub asks a driver to start
+   when the first consumer arrives and to stop when the last leaves; one
+   capture serves every consumer. Nothing claims to be capturing until the
+   driver says so.
+4. **A camera is configured like any other component.** `options_schema/0`,
+   filled from parameters with `param/1`, changed through
+   `c:BB.Sensor.handle_options/2`. There is no camera-specific settings
+   channel — there was, and it was deleted as a duplicate of the parameter
+   system.
+
+## Wiring it in
+
+A camera is an ordinary sensor whose callback module also implements
+`BB.Camera`. Attach it wherever it physically is, so its pose comes out right:
+
+```elixir
+parameters do
+  group :camera do
+    param(:width, type: :integer, default: 1280)
+  end
+end
+
+topology do
+  link :base do
+    joint :pan do
+      type(:revolute)
+
+      link :head do
+        sensor :eye, {BB.Camera.V4L,
+          device: "/dev/video0",
+          width: param([:camera, :width]),
+          height: 720
+        }
+      end
+    end
+  end
+end
+```
+
+Changing `[:camera, :width]` at runtime re-validates the driver's options and
+calls its `handle_options/2`.
 
 ## Consuming
 
@@ -21,15 +73,28 @@ enough to take the node down.
   messages.
 - `BB.Camera.Membrane.Source` when you have a pipeline.
 
-A request yields exactly one frame, strictly newer than the last one you were
-given. Don't build a consumer that assumes it can re-read the current frame —
-it can't, and that is what stops a `next`-in-a-loop consumer spinning.
-
 Assert the format you can handle (`format: :jpeg`) at `open/3` or
 `subscribe/3`. Being told at open is better than discovering it from the bytes.
 
 Treat any `{:error, _}` from `next/2` as a reason to stop streaming. The
 distinctions matter for diagnostics, not for control flow.
+
+## What a frame carries
+
+Beyond `data`, `width`, `height` and the timestamps, `BB.Camera.Frame` has
+fields the hub stamps that you get for free:
+
+- `requested_frame_rate` / `measured_frame_rate` — what was asked for, and what
+  the frames before this one actually did. Compare them; they are separate
+  claims on purpose.
+- `joint_configurations` — every joint's configuration as at capture, so a
+  gimballed camera's pose is recoverable later. Feed it to
+  `BB.Robot.Kinematics.forward_kinematics/3` with `attached_to`. It is the most
+  recently known configuration, not the one at the shutter.
+- `attached_to` — `{:link, name}`, `{:joint, name}` or `:robot`.
+
+`metadata` is for format-specific extras only (a JPEG's component count). Don't
+put anything in it that every frame has.
 
 ## Discovering
 
@@ -57,12 +122,31 @@ camera without the package, because `use BB.Camera` wouldn't compile.
   ingress there is. Never wrap it in a `Task`.
 - Bound what happens before the hub yourself. Ports have no ingress
   backpressure, and closing a port doesn't kill the program behind it.
-- Report values you verified as `:actual` and values you only asked for as
-  `:requested`. `BB.Camera.Settings` exists so that distinction survives to
-  whoever is looking at the robot.
+- Reconfigure in `handle_options/2`. Restart capture only if the change
+  actually reaches the device.
+- Don't measure your own frame rate. The hub sees every frame and publishes
+  `CaptureState` for every camera.
+- Pass `telemetry_clock` through to the hub so a robot can change how often
+  that is published.
 
-## Testing
+## Anti-patterns
 
-Clock a synthetic or test camera `:external` and drive it frame by frame. Never
-sleep, and never race a timeout against work that is merely slow. Every test in
-this package waits for the event that proves the thing happened.
+- **Don't add a camera-specific configuration path.** Options and parameters
+  are the one way in. A second channel is what was removed.
+- **Don't return `{:error, _}` from `handle_options/2`.** The contract is
+  `{:ok, state} | {:stop, reason}`. And know what `{:stop, _}` costs: the
+  parameter is already stored, so the component restarts into the same bad
+  value. Give parameters bounds that match the options they feed.
+- **Don't compute forward kinematics per frame.** Snapshot the configurations
+  and let the consumer compute a transform when it actually wants one; on a
+  small target the `Nx` cost per frame is the thing that hurts.
+- **Don't sleep in tests.** Clock a synthetic or test camera `:external` and
+  drive it frame by frame; clock the hub's telemetry `:external` and close a
+  window by sending `{:tick, monotonic_ns}`. Wait for the event that proves
+  the thing happened.
+
+## Further reading
+
+- [bb_camera docs](https://hexdocs.pm/bb_camera)
+- `BB.Camera.Hub` for the capture state machine and the demand model
+- [Writing a camera driver](https://hexdocs.pm/bb_camera/01-writing-a-camera-driver.html)

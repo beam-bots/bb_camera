@@ -6,6 +6,11 @@ defmodule BB.Message.Camera.CaptureState do
   @moduledoc """
   How a running capture is actually going, published periodically.
 
+  `capture_state` is the same lifecycle value `BB.Camera.Hub.capture_state/1`
+  returns, so a subscriber watching only this message can tell whether the
+  camera is capturing or on its way down without asking. The rest describes
+  the window just ended.
+
   `requested_frame_rate` is what the camera was asked for and
   `measured_frame_rate` is what the frames did. They are separate fields
   because they are separate claims: a driver can pass `-framerate 30` to
@@ -26,10 +31,21 @@ defmodule BB.Message.Camera.CaptureState do
   Carries no image data, as nothing published on `BB.PubSub` ever does.
   """
 
-  defstruct [:frames, :measured_frame_rate, :requested_frame_rate, :subscriber_count]
+  defstruct [
+    :capture_state,
+    :frames,
+    :measured_frame_rate,
+    :requested_frame_rate,
+    :subscriber_count
+  ]
 
   use BB.Message,
     schema: [
+      capture_state: [
+        type: {:in, [:capturing, :stopping]},
+        required: true,
+        doc: "Where the capture is in its lifecycle; see `BB.Camera.Hub`"
+      ],
       frames: [
         type: :non_neg_integer,
         required: true,
@@ -53,6 +69,7 @@ defmodule BB.Message.Camera.CaptureState do
     ]
 
   @type t :: %__MODULE__{
+          capture_state: :capturing | :stopping,
           frames: non_neg_integer(),
           measured_frame_rate: float() | nil,
           requested_frame_rate: float() | nil,

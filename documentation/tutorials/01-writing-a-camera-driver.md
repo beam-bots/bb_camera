@@ -22,7 +22,7 @@ Nothing below assumes where your frames come from. A subprocess, a NIF calling
 a platform capture framework, a network stream, or arithmetic all meet this
 interface identically.
 
-## Two callbacks of your own
+## The one callback of your own
 
 ### `stream_info/1` — and it must be pure
 
@@ -117,6 +117,12 @@ parameter, and changing it at runtime re-validates the options against your
 schema and calls your `c:BB.Sensor.handle_options/2`:
 
 ```elixir
+parameters do
+  group :camera do
+    param(:width, type: :pos_integer, default: 640)
+  end
+end
+
 topology do
   link :head do
     sensor :eye, {MyCamera, device: "/dev/video0", width: param([:camera, :width])}
@@ -131,9 +137,22 @@ def handle_options(new_opts, state) do
 end
 ```
 
-If the new geometry differs from what you declared, tell the hub with
-`BB.Camera.Hub.update_stream_info/2` so consumers hear about it before the
-first frame it describes.
+Two things to get right here.
+
+**Say what changed, in the right way.** If you can retune the device in place
+and the geometry moved, `BB.Camera.Hub.update_stream_info/2` tells consumers
+before the first frame the new format describes. If the change means a new
+capture — as it does whenever the device negotiates on open — then it is an
+end and a beginning: `capture_stopped/2`, then `capture_started/2` when the
+replacement produces a frame. Don't announce a format the old capture is still
+producing.
+
+**You cannot refuse.** The contract is `{:ok, state} | {:stop, reason}`; there
+is no "no thank you". Worse, the parameter was validated against *its own*
+declared type, stored, and published before you were asked, so stopping means
+restarting into the same value and stopping again. Declare parameters with
+bounds that match the options they feed — `type: :pos_integer` above, not
+`:integer` — and treat `{:stop, _}` as the last resort it is.
 
 There is no camera-specific settings channel. One schema, one way to change it.
 
@@ -165,6 +184,24 @@ the data if you can.
 expectation whenever capture is confirmed started, so you may restart at zero
 per session or carry one counter across restarts, whichever your backend makes
 natural. Leave it `nil` and the hub stamps it.
+
+## What the hub adds on the way past
+
+Four fields on every frame are the hub's job, not yours. Don't compute them,
+and don't duplicate them in `metadata`:
+
+- `measured_frame_rate` and `requested_frame_rate` — the hub sees every frame,
+  so it counts them. **Don't measure your own rate.** The same numbers go out
+  periodically as `BB.Message.Camera.CaptureState`, once a second by default;
+  accept a `:telemetry_clock` option and pass it to `Hub.start_link/1` so a
+  robot can change that.
+- `joint_configurations` and `attached_to` — where the robot was when the
+  frame arrived, so a gimballed camera's pose can be recovered afterwards.
+  Your driver knows nothing about the robot's shape and shouldn't have to.
+
+`metadata` is yours, and it is for what only *your* format knows — a JPEG's
+component count, its precision, whether it was progressive. Anything every
+frame has belongs in a named field, which means it belongs to `bb_camera`.
 
 ## Bounding what happens before the hub
 
@@ -206,13 +243,19 @@ either way.
 ## Testing it
 
 Clock your driver externally and drive it frame by frame. Never sleep, and
-never race a timeout against work that is merely slow.
+never race a timeout against work that is merely slow. Give your driver some
+way for a test to say "produce one now" — `BB.Camera.Synthetic.capture_frame/2`
+is that function for the synthetic camera, and yours wants an equivalent:
 
 ```elixir
 {:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: :jpeg)
 :ok = MyCamera.capture_frame(MyRobot, :eye)
 assert {:ok, %BB.Camera.Frame{}} = BB.Camera.Media.next(session, 1_000)
 ```
+
+The hub's telemetry has the same treatment: start it `telemetry_clock:
+:external` and close a measurement window by sending the hub
+`{:tick, monotonic_ns}`, rather than waiting a real second for one.
 
 `BB.Camera.Synthetic` is a complete driver built this way and is worth reading
 start to finish — it is shorter than this page.

@@ -97,6 +97,8 @@ defmodule BB.Camera.Hub do
   alias BB.Robot.Runtime
   alias BB.Robot.State, as: RobotState
 
+  require Logger
+
   @default_telemetry_rate 1.0
 
   @start_schema [
@@ -119,8 +121,11 @@ defmodule BB.Camera.Hub do
       doc: """
       How often `BB.Message.Camera.CaptureState` is published, as a
       `t:BB.Loop.clock/0`. Defaults to `{:rate, #{@default_telemetry_rate}}`.
-      `:external` publishes only when the hub is sent `{:tick, monotonic_ns}`,
-      which is how tests measure a window without waiting for one.
+
+      Under `:external` the hub closes no window of its own and publishes only
+      when sent `{:tick, monotonic_ns}`, taking that timestamp as the end of
+      the window. Hand it a real `System.monotonic_time(:nanosecond)` unless
+      you mean to measure against something else.
       """
     ]
   ]
@@ -287,17 +292,18 @@ defmodule BB.Camera.Hub do
     bb = opts[:bb]
     driver = opts[:driver]
 
-    robot_state = robot_state(bb.robot)
+    camera = List.last(bb.path)
 
     {:ok,
      %{
        bb: bb,
-       camera: List.last(bb.path),
+       camera: camera,
        topic: [:sensor | bb.path],
        driver: driver,
        driver_monitor: Process.monitor(driver),
-       robot_state: robot_state,
-       attached_to: attachment(robot_state, bb.path),
+       robot_state: nil,
+       runtime_monitor: nil,
+       attached_to: attachment(bb.robot, camera, bb.path),
        stream_info: opts[:stream_info],
        stream_info_generation: 0,
        capture_state: :idle,
@@ -306,8 +312,8 @@ defmodule BB.Camera.Hub do
        last_sequence: nil,
        frame_count: 0,
        subscribers: %{},
-       telemetry_loop:
-         BB.Loop.new(bb, clock: opts[:telemetry_clock] || {:rate, @default_telemetry_rate}),
+       telemetry_clock: opts[:telemetry_clock] || {:rate, @default_telemetry_rate},
+       telemetry_loop: nil,
        window_frames: 0,
        measured_frame_rate: nil
      }}
@@ -356,6 +362,8 @@ defmodule BB.Camera.Hub do
 
   def handle_call({:deliver, frame}, _from, state)
       when state.capture_state in [:capturing, :stopping] do
+    state = ensure_robot_state(state)
+
     case sequence_for(frame, state) do
       {:ok, sequence} ->
         frame = %{
@@ -398,7 +406,7 @@ defmodule BB.Camera.Hub do
         last_sequence: nil,
         latest: nil,
         subscribers: forget_sequences(state.subscribers),
-        telemetry_loop: BB.Loop.arm(state.telemetry_loop),
+        telemetry_loop: start_window(state),
         window_frames: 0,
         measured_frame_rate: nil
     }
@@ -439,11 +447,27 @@ defmodule BB.Camera.Hub do
     {:stop, :normal, state}
   end
 
+  # The state struct is only a handle on a table `Runtime` owns. When it goes
+  # the handle is worthless, and holding it would raise on the next frame
+  # rather than simply going without a pose for a moment.
+  def handle_info({:DOWN, monitor, :process, _pid, _reason}, state)
+      when monitor == state.runtime_monitor do
+    {:noreply, %{state | robot_state: nil, runtime_monitor: nil}}
+  end
+
   def handle_info({:DOWN, _monitor, :process, pid, _reason}, state) do
     state.subscribers
     |> Enum.filter(fn {_ref, subscriber} -> subscriber.pid == pid end)
     |> Enum.reduce(state, fn {ref, _}, state -> drop_subscriber(state, ref) end)
     |> then(&{:noreply, &1})
+  end
+
+  # A tick with no loop behind it is one that outlived the session it was
+  # scheduled in, which `cancel/1` races rather than prevents.
+  def handle_info(tick, %{telemetry_loop: nil} = state)
+      when tick == :tick
+      when is_tuple(tick) and elem(tick, 0) == :tick do
+    {:noreply, state}
   end
 
   def handle_info(:tick, state) do
@@ -497,7 +521,7 @@ defmodule BB.Camera.Hub do
         latest: nil,
         last_sequence: nil,
         subscribers: end_session(state.subscribers),
-        telemetry_loop: BB.Loop.cancel(state.telemetry_loop),
+        telemetry_loop: stop_window(state),
         window_frames: 0,
         measured_frame_rate: nil
     }
@@ -649,37 +673,86 @@ defmodule BB.Camera.Hub do
 
   defp joint_configurations(state), do: RobotState.get_all_configurations(state.robot_state)
 
-  # The hub lives wherever its driver was declared, and the sensor's own name
-  # is the last element of the path. Whatever precedes it is the thing the
-  # camera is bolted to - a link, a joint, or nothing at all for a camera
-  # declared on the robot rather than in its topology.
-  defp attachment(nil, _path), do: nil
+  # The robot struct records where every sensor in the topology hangs, so this
+  # reads it rather than deriving it a second time. It is compile-time data,
+  # which means a hub can say where its camera is even when nothing is
+  # running.
+  #
+  # Robot-level sensors are the exception: `BB.Robot.Builder` collects only
+  # the ones declared inside the topology, so a camera in the `sensors` block
+  # is absent from `robot.sensors` entirely. Such a sensor has nothing above
+  # it but the robot, which its path says by having no parent in it.
+  defp attachment(robot_module, camera, path) do
+    case robot_module.robot() do
+      %{sensors: %{^camera => %{attached_to: attached_to}}} -> attached_to
+      _otherwise -> if length(path) < 2, do: :robot
+    end
+  rescue
+    UndefinedFunctionError -> nil
+  end
 
-  defp attachment(_robot_state, path) when length(path) < 2, do: :robot
-
-  defp attachment(robot_state, path) do
-    parent = path |> Enum.drop(-1) |> List.last()
-    robot = robot_state.robot
-
-    cond do
-      Map.has_key?(robot.joints, parent) -> {:joint, parent}
-      Map.has_key?(robot.links, parent) -> {:link, parent}
-      true -> :robot
+  # The state struct carries the ETS table `Runtime` owns, so a hub that
+  # cached one across a `Runtime` restart would be holding a deleted table and
+  # would raise on the next frame. Monitoring it means the reference is
+  # dropped when it dies and picked up again on the next frame, which is the
+  # only moment it is needed.
+  defp ensure_robot_state(%{robot_state: nil} = state) do
+    case fetch_robot_state(state.bb.robot) do
+      nil -> state
+      robot_state -> %{state | robot_state: robot_state, runtime_monitor: monitor_runtime(state)}
     end
   end
 
-  # A hub can be started outside a running robot - in a driver's own unit
-  # tests, say - and a camera that cannot say where it was is a better answer
-  # than one that refuses to start.
-  defp robot_state(robot) do
+  defp ensure_robot_state(state), do: state
+
+  defp monitor_runtime(state) do
+    case BB.Process.whereis(state.bb.robot, Runtime) do
+      pid when is_pid(pid) -> Process.monitor(pid)
+      _otherwise -> nil
+    end
+  end
+
+  # A hub can run without a robot behind it - in a driver's own unit tests,
+  # say - and a camera that cannot say where it was pointing is a better
+  # answer than one that refuses to start. Anything other than "nothing is
+  # there" is worth saying out loud, though: a `Runtime` too busy to answer
+  # would otherwise produce empty pose snapshots for the life of the process
+  # with nothing to explain them.
+  defp fetch_robot_state(robot) do
     Runtime.get_robot_state(robot)
   catch
-    :exit, _reason -> nil
+    :exit, {reason, _call} when reason in [:noproc, :normal, :shutdown] ->
+      nil
+
+    :exit, reason ->
+      Logger.warning(
+        "#{inspect(robot)} could not be asked for its state, so frames will carry no pose: " <>
+          inspect(reason)
+      )
+
+      nil
   end
 
   # ----------------------------------------------------------------------------
   # Capture telemetry
   # ----------------------------------------------------------------------------
+
+  # A loop is built fresh for each session rather than re-armed. `arm/1` keeps
+  # the timestamp of the last tick, so a re-armed loop measures its first
+  # interval of a new session from the last tick of the previous one - the
+  # whole idle gap between them included - and a camera that had been stopped
+  # for an hour would open with a rate near zero. There is nothing to carry
+  # across: a window belongs to the session it was counted in.
+  defp start_window(state) do
+    stop_window(state)
+
+    state.bb
+    |> BB.Loop.new(clock: state.telemetry_clock)
+    |> BB.Loop.arm()
+  end
+
+  defp stop_window(%{telemetry_loop: nil}), do: nil
+  defp stop_window(state), do: BB.Loop.cancel(state.telemetry_loop)
 
   # The rate is counted over the window rather than smoothed across the
   # session, so a capture that has stalled reports 0.0 rather than whatever it
@@ -693,6 +766,7 @@ defmodule BB.Camera.Hub do
     measured = if dt && dt > 0, do: state.window_frames / dt
 
     publish(state, CaptureState,
+      capture_state: state.capture_state,
       frames: state.window_frames,
       measured_frame_rate: measured,
       requested_frame_rate: state.stream_info.frame_rate,

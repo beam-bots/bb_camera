@@ -456,6 +456,28 @@ defmodule BB.Camera.HubTest do
       assert telemetry.frames == 0
     end
 
+    test "a later session measures from its own start, not the previous one's end",
+         %{hub: hub, subscription: subscription} do
+      send(hub, {:tick, 0})
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{measured_frame_rate: nil}}}
+
+      # End the session, and leave a long gap before the next one.
+      :ok = Camera.unsubscribe(subscription)
+      assert_receive {:driver, :stop_capture}
+      :ok = TestDriver.confirm_stop(GatedCamera, :eye)
+
+      {:ok, _subscription} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+
+      # An hour of wall clock later, measured against the previous session's
+      # last tick, 30 frames would read as 0.008fps rather than nothing.
+      send(hub, {:tick, 3_600_000_000_000})
+
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
+      assert telemetry.measured_frame_rate == nil
+    end
+
     test "reports the frames per second the window actually carried", %{hub: hub} do
       send(hub, {:tick, 0})
       assert_receive {:bb, _, %BB.Message{payload: %CaptureState{measured_frame_rate: nil}}}

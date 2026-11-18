@@ -79,11 +79,13 @@ that test awkward, the change is wrong.
   when frames have stopped entirely.
 - **The hub stamps the pose snapshot, and no driver should.** Where a robot's
   joints are isn't something a camera driver author should have to know
-  about. Every joint's configuration is read from the state table per frame -
-  not just the camera's own chain, which costs one table read per joint more
-  and answers questions the chain can't, such as where the gripper was.
-  `BB.Robot.State.get_chain_configurations/2` is there if that ever needs
-  narrowing.
+  about. Every joint's configuration is read from the state table per frame
+  rather than just the camera's own chain, because the chain can't answer
+  where the gripper was. That is not free: it is a lookup and a decode per
+  joint per frame, and a `:floating` or `:planar` joint decodes a whole
+  `BB.Math.Transform`, which a legged robot at 60fps would feel.
+  `BB.Robot.State.get_chain_configurations/2` is the narrower read if it ever
+  needs to be.
 - **The transform is not computed per frame.** Forward kinematics is a chain
   of 4x4 `Nx` products, which on a small target costs far more than reading
   configurations, and most frames are never asked where they were taken. The
