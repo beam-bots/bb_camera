@@ -47,6 +47,9 @@ defmodule BB.Camera.Synthetic do
   question never comes up.
   """
 
+  import BB.Unit
+  import BB.Unit.Option
+
   use BB.Sensor,
     options_schema: [
       width: [
@@ -64,10 +67,13 @@ defmodule BB.Camera.Synthetic do
         default: {:rate, 10},
         doc: "`{:rate, hertz}` to free-run, or `:external` to produce on demand"
       ],
-      telemetry_clock: [
-        type: {:or, [{:tuple, [{:in, [:rate]}, :any]}, {:in, [:external]}]},
-        default: {:rate, 1},
-        doc: "How often the hub publishes `BB.Message.Camera.CaptureState`"
+      publish_rate: [
+        type: {:or, [unit_type(compatible: :hertz), {:in, [:external]}]},
+        default: ~u(1 hertz),
+        doc: """
+        How often the hub publishes `BB.Message.Camera.CaptureState`, or
+        `:external` to publish only when it is sent `{:tick, monotonic_ns}`
+        """
       ],
       frames: [
         type: {:list, :string},
@@ -161,7 +167,7 @@ defmodule BB.Camera.Synthetic do
       Hub.start_link(
         bb: opts.bb,
         stream_info: declared,
-        telemetry_clock: opts.telemetry_clock
+        publish_rate: opts.publish_rate
       )
 
     {:ok,

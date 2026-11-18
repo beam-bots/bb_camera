@@ -193,7 +193,7 @@ and don't duplicate them in `metadata`:
 - `measured_frame_rate` and `requested_frame_rate` — the hub sees every frame,
   so it counts them. **Don't measure your own rate.** The same numbers go out
   periodically as `BB.Message.Camera.CaptureState`, once a second by default;
-  accept a `:telemetry_clock` option and pass it to `Hub.start_link/1` so a
+  accept a `:publish_rate` option and pass it to `Hub.start_link/1` so a
   robot can change that.
 - `joint_configurations` and `attached_to` — where the robot was when the
   frame arrived, so a gimballed camera's pose can be recovered afterwards.
@@ -253,8 +253,8 @@ is that function for the synthetic camera, and yours wants an equivalent:
 assert {:ok, %BB.Camera.Frame{}} = BB.Camera.Media.next(session, 1_000)
 ```
 
-The hub's telemetry has the same treatment: start it `telemetry_clock:
-:external` and close a measurement window by sending the hub
+The hub's capture-state publishing has the same treatment: start it
+`publish_rate: :external` and close a measurement window by sending the hub
 `{:tick, monotonic_ns}`, rather than waiting a real second for one.
 
 `BB.Camera.Synthetic` is a complete driver built this way and is worth reading

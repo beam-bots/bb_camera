@@ -17,7 +17,7 @@ cameras.
 ## Core principles
 
 1. **Frames never go on `BB.PubSub`.** It carries capture lifecycle
-   (`BB.Message.Camera.BeginCapture`, `EndCapture`) and periodic telemetry
+   (`BB.Message.Camera.BeginCapture`, `EndCapture`) and periodic capture state
    (`CaptureState`), and nothing else — not in events, not in errors, not in
    metadata. A frame on a fan-out registry has no backpressure behind it, and
    one slow subscriber is enough to take the node down.
@@ -126,7 +126,7 @@ camera without the package, because `use BB.Camera` wouldn't compile.
   actually reaches the device.
 - Don't measure your own frame rate. The hub sees every frame and publishes
   `CaptureState` for every camera.
-- Pass `telemetry_clock` through to the hub so a robot can change how often
+- Pass `publish_rate` through to the hub so a robot can change how often
   that is published.
 
 ## Anti-patterns
@@ -141,7 +141,7 @@ camera without the package, because `use BB.Camera` wouldn't compile.
   and let the consumer compute a transform when it actually wants one; on a
   small target the `Nx` cost per frame is the thing that hurts.
 - **Don't sleep in tests.** Clock a synthetic or test camera `:external` and
-  drive it frame by frame; clock the hub's telemetry `:external` and close a
+  drive it frame by frame; set the hub's `publish_rate: :external` and close a
   window by sending `{:tick, monotonic_ns}`. Wait for the event that proves
   the thing happened.
 

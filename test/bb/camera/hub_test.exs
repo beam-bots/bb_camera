@@ -437,7 +437,7 @@ defmodule BB.Camera.HubTest do
              TestDriver.deliver(GatedCamera, :eye, "too-early")
   end
 
-  describe "capture telemetry" do
+  describe "publishing capture state" do
     setup do
       {:ok, subscription} = Camera.subscribe(GatedCamera, :eye)
       assert_receive {:driver, :start_capture}
@@ -451,9 +451,9 @@ defmodule BB.Camera.HubTest do
     test "a session's first window has no interval behind it", %{hub: hub} do
       send(hub, {:tick, 1_000})
 
-      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
-      assert telemetry.measured_frame_rate == nil
-      assert telemetry.frames == 0
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = published}}
+      assert published.measured_frame_rate == nil
+      assert published.frames == 0
     end
 
     test "a later session measures from its own start, not the previous one's end",
@@ -474,8 +474,8 @@ defmodule BB.Camera.HubTest do
       # last tick, 30 frames would read as 0.008fps rather than nothing.
       send(hub, {:tick, 3_600_000_000_000})
 
-      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
-      assert telemetry.measured_frame_rate == nil
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = published}}
+      assert published.measured_frame_rate == nil
     end
 
     test "reports the frames per second the window actually carried", %{hub: hub} do
@@ -486,10 +486,10 @@ defmodule BB.Camera.HubTest do
 
       send(hub, {:tick, 1_000_000_000})
 
-      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
-      assert telemetry.frames == 30
-      assert telemetry.measured_frame_rate == 30.0
-      assert telemetry.subscriber_count == 1
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = published}}
+      assert published.frames == 30
+      assert published.measured_frame_rate == 30.0
+      assert published.subscriber_count == 1
     end
 
     test "a stalled capture reports nothing rather than what it used to manage",
@@ -504,9 +504,9 @@ defmodule BB.Camera.HubTest do
       # No frames at all in the next window.
       send(hub, {:tick, 2_000_000_000})
 
-      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
-      assert telemetry.frames == 0
-      assert telemetry.measured_frame_rate == 0.0
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = published}}
+      assert published.frames == 0
+      assert published.measured_frame_rate == 0.0
     end
 
     test "carries the rate the camera was asked for, as asked for" do
@@ -520,8 +520,8 @@ defmodule BB.Camera.HubTest do
       {:ok, hub} = Camera.hub(GatedCamera, :eye)
       send(hub, {:tick, 0})
 
-      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = telemetry}}
-      assert telemetry.requested_frame_rate == 30.0
+      assert_receive {:bb, _, %BB.Message{payload: %CaptureState{} = published}}
+      assert published.requested_frame_rate == 30.0
     end
 
     test "a frame carries both rates, so holding one is enough to compare them",

@@ -49,10 +49,10 @@ defmodule BB.Camera.TestDriver do
   def init(opts) do
     opts = Map.new(opts)
     {:ok, info} = stream_info(Enum.to_list(opts))
-    # Externally clocked so a test closes a measurement window by sending the
+    # Externally paced so a test closes a measurement window by sending the
     # hub `{:tick, monotonic_ns}`, rather than waiting a real second for one.
     {:ok, hub} =
-      Hub.start_link(bb: opts.bb, stream_info: info, telemetry_clock: :external)
+      Hub.start_link(bb: opts.bb, stream_info: info, publish_rate: :external)
 
     {:ok, %{bb: opts.bb, hub: hub, reporter: nil, sequence: 0}}
   end
