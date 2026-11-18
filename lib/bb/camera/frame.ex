@@ -54,6 +54,38 @@ defmodule BB.Camera.Frame do
   them whatever the driver is. `metadata` is for what only some drivers know -
   a JPEG's component count, say - and nothing should go in it that the
   framework puts on every frame.
+
+  ## Where the camera was
+
+  A camera on a gimbal is somewhere different in every frame, and the pose it
+  had when a frame was captured cannot be recovered afterwards - by the time
+  anyone asks, the joints have moved. So the hub stamps
+  `joint_configurations` onto each frame as it passes through: every joint's
+  configuration, read from the robot's state as the frame arrived.
+
+  `attached_to` says where the camera hangs - `{:link, name}`, `{:joint,
+  name}` or `:robot` - which is what turns those configurations into a pose:
+
+      BB.Robot.Kinematics.forward_kinematics(
+        robot,
+        frame.joint_configurations,
+        link_name
+      )
+
+  The transform is deliberately *not* computed here. It is a chain of 4x4
+  `Nx` products, which on a small target costs far more per frame than reading
+  the configurations does, and most frames are never asked where they were
+  taken. Snapshotting the cheap, perishable part and leaving the expensive,
+  reproducible part to whoever wants it is the whole trick.
+
+  Every joint is captured rather than only the camera's own chain. It costs
+  one more table read per joint and answers questions the camera's chain
+  can't, such as where the gripper was in this picture.
+
+  **This is the most recently known configuration, not the configuration at
+  the shutter.** Joint state is only as fresh as the last estimator update
+  that wrote it. A joint reporting at 100Hz is tighter than a 30fps frame
+  interval; a slow encoder is not, and nothing here can make it so.
   """
 
   alias BB.Camera.Format
@@ -68,6 +100,8 @@ defmodule BB.Camera.Frame do
     :wall_time,
     :measured_frame_rate,
     :requested_frame_rate,
+    :attached_to,
+    joint_configurations: %{},
     metadata: %{}
   ]
 
@@ -81,6 +115,8 @@ defmodule BB.Camera.Frame do
           wall_time: integer(),
           measured_frame_rate: float() | nil,
           requested_frame_rate: float() | nil,
+          attached_to: {:link, atom()} | {:joint, atom()} | :robot | nil,
+          joint_configurations: %{atom() => number()},
           metadata: map()
         }
 
@@ -112,6 +148,16 @@ defmodule BB.Camera.Frame do
       type: {:or, [:float, nil]},
       default: nil,
       doc: "Frames per second the camera was asked for; stamped by the hub"
+    ],
+    attached_to: [
+      type: :any,
+      default: nil,
+      doc: "Where on the robot the camera is; stamped by the hub"
+    ],
+    joint_configurations: [
+      type: :map,
+      default: %{},
+      doc: "Every joint's configuration as at capture; stamped by the hub"
     ],
     metadata: [
       type: :map,

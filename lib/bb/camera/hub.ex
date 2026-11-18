@@ -94,6 +94,8 @@ defmodule BB.Camera.Hub do
   alias BB.Error.State.Camera.NotCapturing
   alias BB.Message
   alias BB.Message.Camera.{BeginCapture, CaptureState, EndCapture}
+  alias BB.Robot.Runtime
+  alias BB.Robot.State, as: RobotState
 
   @default_telemetry_rate 1.0
 
@@ -285,6 +287,8 @@ defmodule BB.Camera.Hub do
     bb = opts[:bb]
     driver = opts[:driver]
 
+    robot_state = robot_state(bb.robot)
+
     {:ok,
      %{
        bb: bb,
@@ -292,6 +296,8 @@ defmodule BB.Camera.Hub do
        topic: [:sensor | bb.path],
        driver: driver,
        driver_monitor: Process.monitor(driver),
+       robot_state: robot_state,
+       attached_to: attachment(robot_state, bb.path),
        stream_info: opts[:stream_info],
        stream_info_generation: 0,
        capture_state: :idle,
@@ -356,7 +362,9 @@ defmodule BB.Camera.Hub do
           frame
           | sequence: sequence,
             measured_frame_rate: state.measured_frame_rate,
-            requested_frame_rate: state.stream_info.frame_rate
+            requested_frame_rate: state.stream_info.frame_rate,
+            attached_to: state.attached_to,
+            joint_configurations: joint_configurations(state)
         }
 
         state =
@@ -627,6 +635,46 @@ defmodule BB.Camera.Hub do
         Process.demonitor(subscriber.monitor, [:flush])
         release_capture(state)
     end
+  end
+
+  # ----------------------------------------------------------------------------
+  # Where the camera was
+  # ----------------------------------------------------------------------------
+
+  # A camera on a gimbal is somewhere different in every frame, and once the
+  # joints have moved there is no recovering where it was. Reading the state
+  # table is cheap enough to do per frame; computing the transform is not, and
+  # is reproducible later from this, so it isn't done here.
+  defp joint_configurations(%{robot_state: nil}), do: %{}
+
+  defp joint_configurations(state), do: RobotState.get_all_configurations(state.robot_state)
+
+  # The hub lives wherever its driver was declared, and the sensor's own name
+  # is the last element of the path. Whatever precedes it is the thing the
+  # camera is bolted to - a link, a joint, or nothing at all for a camera
+  # declared on the robot rather than in its topology.
+  defp attachment(nil, _path), do: nil
+
+  defp attachment(_robot_state, path) when length(path) < 2, do: :robot
+
+  defp attachment(robot_state, path) do
+    parent = path |> Enum.drop(-1) |> List.last()
+    robot = robot_state.robot
+
+    cond do
+      Map.has_key?(robot.joints, parent) -> {:joint, parent}
+      Map.has_key?(robot.links, parent) -> {:link, parent}
+      true -> :robot
+    end
+  end
+
+  # A hub can be started outside a running robot - in a driver's own unit
+  # tests, say - and a camera that cannot say where it was is a better answer
+  # than one that refuses to start.
+  defp robot_state(robot) do
+    Runtime.get_robot_state(robot)
+  catch
+    :exit, _reason -> nil
   end
 
   # ----------------------------------------------------------------------------

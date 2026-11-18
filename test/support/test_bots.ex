@@ -55,6 +55,40 @@ defmodule BB.Camera.TestBots.FreeRunningCamera do
   end
 end
 
+defmodule BB.Camera.TestBots.GimbalCamera do
+  @moduledoc """
+  A camera on a joint that moves.
+
+  The point of the pose snapshot is that a gimballed camera is somewhere
+  different in every frame, so testing it needs a joint whose configuration
+  can actually change.
+  """
+  use BB
+
+  settings do
+    name(:bb_camera_gimbal)
+  end
+
+  topology do
+    link :base do
+      joint :pan do
+        type(:revolute)
+
+        limit(
+          lower: ~u(-90 degree),
+          upper: ~u(90 degree),
+          velocity: ~u(60 degree_per_second),
+          effort: ~u(1 newton_meter)
+        )
+
+        link :head do
+          sensor(:eye, {BB.Camera.Synthetic, clock: :external})
+        end
+      end
+    end
+  end
+end
+
 defmodule BB.Camera.TestBots.MixedTopology do
   @moduledoc """
   Cameras at every attachment point, plus a sensor that isn't one.

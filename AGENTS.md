@@ -72,6 +72,27 @@ that test awkward, the change is wrong.
 - **What the camera actually produces is `StreamInfo`, not a setting.** A
   driver reports negotiated geometry with `Hub.update_stream_info/2`, which is
   the honest channel for "what I got" as distinct from "what I asked for".
+- **The hub measures the frame rate, and no driver should.** Every frame goes
+  through `deliver/2`, so one implementation covers every camera. The window
+  is counted rather than smoothed, so a stalled capture reports `0.0` instead
+  of the rate it used to manage, and it closes on a clock so it still reports
+  when frames have stopped entirely.
+- **The hub stamps the pose snapshot, and no driver should.** Where a robot's
+  joints are isn't something a camera driver author should have to know
+  about. Every joint's configuration is read from the state table per frame -
+  not just the camera's own chain, which costs one table read per joint more
+  and answers questions the chain can't, such as where the gripper was.
+  `BB.Robot.State.get_chain_configurations/2` is there if that ever needs
+  narrowing.
+- **The transform is not computed per frame.** Forward kinematics is a chain
+  of 4x4 `Nx` products, which on a small target costs far more than reading
+  configurations, and most frames are never asked where they were taken. The
+  cheap perishable part is snapshotted; the expensive reproducible part is
+  left to whoever wants it.
+- **A pose snapshot is the most recently known configuration, not the
+  configuration at the shutter.** Joint state is as fresh as the last
+  estimator write and no fresher. Say so rather than letting it read as an
+  exact instant.
 - **`BB.Camera.Info` carries no driver options**, so device paths and
   credentials can't reach a UI through discovery.
 - **Interframe formats are refused, not dropped.** See `BB.Camera.Format`.
