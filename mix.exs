@@ -92,10 +92,15 @@ defmodule BB.Camera.MixProject do
       # Membrane's `ratio` still declares `decimal ~> 1.6 or ~> 2.0`, which
       # would hold this package's own dev/test tree down on a `decimal` with
       # open DoS advisories. `ratio` treats `decimal` as optional and Membrane
-      # never hands it one, so overriding is safe here. A consumer that opts
-      # into Membrane needs the same line; one that doesn't gets `decimal 3.x`
-      # from `bb` with nothing to argue about.
-      {:decimal, "~> 3.0", override: true},
+      # never hands it one, so overriding is safe here.
+      #
+      # Scoped to dev/test because Hex refuses to build a package that
+      # overrides one of its own dependencies, and because it would do a
+      # consumer no good anyway: Mix honours `override: true` only from the
+      # top-level project. A consumer that opts into Membrane needs this line
+      # in its own `mix.exs`; one that doesn't gets `decimal 3.x` from `bb`
+      # with nothing to argue about.
+      {:decimal, "~> 3.0", override: true, only: [:dev, :test]},
 
       # dev/test
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
