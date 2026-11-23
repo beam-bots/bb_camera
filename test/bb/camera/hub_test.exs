@@ -142,7 +142,7 @@ defmodule BB.Camera.HubTest do
       :ok = TestDriver.deliver(GatedCamera, :eye, "after-restart")
 
       ref = second.ref
-      assert_receive {:bb_camera, ^ref, %Frame{data: "after-restart"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "after-restart" <> _}}
     end
 
     test "a restarted capture isn't withheld by what a consumer saw last time" do
@@ -166,7 +166,7 @@ defmodule BB.Camera.HubTest do
       :ok = Camera.request(subscription)
       :ok = TestDriver.deliver(GatedCamera, :eye, "session-two")
 
-      assert_receive {:bb_camera, ^ref, %Frame{data: "session-two", sequence: 0}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "session-two" <> _, sequence: 0}}
     end
   end
 
@@ -214,7 +214,7 @@ defmodule BB.Camera.HubTest do
       # timeout on a camera that had come back perfectly well.
       :ok = TestDriver.deliver(GatedCamera, :eye, "belongs-to-the-new-session")
 
-      assert_receive {:bb_camera, ^second_ref, %Frame{data: "belongs-to-the-new-session"}}
+      assert_receive {:bb_camera, ^second_ref, %Frame{data: "belongs-to-the-new-session" <> _}}
     end
 
     test "a media session reads the first frame of the new capture without re-asking" do
@@ -243,7 +243,7 @@ defmodule BB.Camera.HubTest do
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
       :ok = TestDriver.deliver(GatedCamera, :eye, "first-of-the-new-session")
 
-      assert {:ok, %Frame{data: "first-of-the-new-session"}} = Task.await(reader)
+      assert {:ok, %Frame{data: "first-of-the-new-session" <> _}} = Task.await(reader)
     end
   end
 
@@ -268,7 +268,7 @@ defmodule BB.Camera.HubTest do
       :ok = Camera.request(subscription)
       :ok = TestDriver.deliver(GatedCamera, :eye, "first")
 
-      assert_receive {:bb_camera, ^ref, %Frame{data: "first"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "first" <> _}}
     end
 
     test "a request after a frame is served immediately", %{
@@ -278,7 +278,7 @@ defmodule BB.Camera.HubTest do
       :ok = TestDriver.deliver(GatedCamera, :eye, "already-here")
       :ok = Camera.request(subscription)
 
-      assert_receive {:bb_camera, ^ref, %Frame{data: "already-here"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "already-here" <> _}}
     end
 
     test "a second request never re-delivers a frame already given", %{
@@ -287,7 +287,7 @@ defmodule BB.Camera.HubTest do
     } do
       :ok = Camera.request(subscription)
       :ok = TestDriver.deliver(GatedCamera, :eye, "only-once")
-      assert_receive {:bb_camera, ^ref, %Frame{data: "only-once"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "only-once" <> _}}
 
       :ok = Camera.request(subscription)
 
@@ -302,13 +302,13 @@ defmodule BB.Camera.HubTest do
     } do
       :ok = Camera.request(subscription)
       :ok = TestDriver.deliver(GatedCamera, :eye, "one")
-      assert_receive {:bb_camera, ^ref, %Frame{data: "one"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "one" <> _}}
 
       :ok = Camera.request(subscription)
       refute_received {:bb_camera, ^ref, %Frame{}}
 
       :ok = TestDriver.deliver(GatedCamera, :eye, "two")
-      assert_receive {:bb_camera, ^ref, %Frame{data: "two"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "two" <> _}}
     end
 
     test "only the latest frame survives; the ones in between are dropped", %{
@@ -321,7 +321,7 @@ defmodule BB.Camera.HubTest do
 
       :ok = Camera.request(subscription)
 
-      assert_receive {:bb_camera, ^ref, %Frame{data: "current"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "current" <> _}}
       refute_received {:bb_camera, ^ref, %Frame{}}
     end
 
@@ -343,7 +343,7 @@ defmodule BB.Camera.HubTest do
       :ok = Camera.request(other)
       :ok = TestDriver.deliver(GatedCamera, :eye, "shared")
 
-      assert_receive {:bb_camera, ^other_ref, %Frame{data: "shared"}}
+      assert_receive {:bb_camera, ^other_ref, %Frame{data: "shared" <> _}}
       refute_received {:driver, :start_capture}
     end
   end
@@ -366,12 +366,12 @@ defmodule BB.Camera.HubTest do
         TestDriver.update_stream_info(
           GatedCamera,
           :eye,
-          StreamInfo.new!(format: :jpeg, width: 320, height: 240)
+          StreamInfo.new!(format: {:raw, :I420}, width: 320, height: 240)
         )
 
       :ok = Camera.request(subscription)
 
-      refute_received {:bb_camera, ^ref, %Frame{data: "old-geometry"}}
+      refute_received {:bb_camera, ^ref, %Frame{data: "old-geometry" <> _}}
     end
 
     test "the new format arrives before the first frame it describes", %{
@@ -382,14 +382,14 @@ defmodule BB.Camera.HubTest do
         TestDriver.update_stream_info(
           GatedCamera,
           :eye,
-          StreamInfo.new!(format: :jpeg, width: 320, height: 240)
+          StreamInfo.new!(format: {:raw, :I420}, width: 320, height: 240)
         )
 
       :ok = Camera.request(subscription)
       :ok = TestDriver.deliver(GatedCamera, :eye, "new-geometry")
 
       assert_receive {:bb_camera, ^ref, {:stream_info, %StreamInfo{width: 320}}}
-      assert_receive {:bb_camera, ^ref, %Frame{data: "new-geometry"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "new-geometry" <> _}}
     end
 
     test "an unchanged format is not re-announced", %{
@@ -413,19 +413,19 @@ defmodule BB.Camera.HubTest do
     end
 
     test "a frame whose sequence doesn't advance is refused" do
-      frame = Frame.new!(format: :jpeg, width: 64, height: 48, data: "a", sequence: 5)
-      assert :ok = TestDriver.deliver_raw(GatedCamera, :eye, frame)
+      frame = test_frame("a", sequence: 5)
+      assert :ok = TestDriver.deliver_frame(GatedCamera, :eye, frame)
 
-      repeat = Frame.new!(format: :jpeg, width: 64, height: 48, data: "b", sequence: 5)
-      assert {:error, error} = TestDriver.deliver_raw(GatedCamera, :eye, repeat)
+      repeat = test_frame("b", sequence: 5)
+      assert {:error, error} = TestDriver.deliver_frame(GatedCamera, :eye, repeat)
       assert error.sequence == 5
       assert error.last_sequence == 5
     end
 
     test "the hub stamps a sequence the driver left out" do
-      frame = Frame.new!(format: :jpeg, width: 64, height: 48, data: "a")
+      frame = test_frame("a")
       assert frame.sequence == nil
-      assert :ok = TestDriver.deliver_raw(GatedCamera, :eye, frame)
+      assert :ok = TestDriver.deliver_frame(GatedCamera, :eye, frame)
     end
   end
 
@@ -514,7 +514,7 @@ defmodule BB.Camera.HubTest do
         TestDriver.confirm_start(
           GatedCamera,
           :eye,
-          StreamInfo.new!(format: :jpeg, width: 64, height: 48, frame_rate: 30.0)
+          StreamInfo.new!(format: {:raw, :I420}, width: 64, height: 48, frame_rate: 30.0)
         )
 
       {:ok, hub} = Camera.hub(GatedCamera, :eye)
@@ -575,7 +575,7 @@ defmodule BB.Camera.HubTest do
       :ok = TestDriver.deliver(GatedCamera, :eye, "sentinel-frame-bytes")
 
       ref = subscription.ref
-      assert_receive {:bb_camera, ^ref, %Frame{data: "sentinel-frame-bytes"}}
+      assert_receive {:bb_camera, ^ref, %Frame{data: "sentinel-frame-bytes" <> _}}
 
       refute Enum.any?(drain_pubsub(), fn message ->
                message |> :erlang.term_to_binary() |> String.contains?("sentinel-frame-bytes")
@@ -620,5 +620,11 @@ defmodule BB.Camera.HubTest do
       assert_receive {:driver, :start_capture}
       assert_receive {:driver, :stop_capture}
     end
+  end
+
+  defp test_frame(label, opts \\ []) do
+    Frame.new!(
+      [format: {:raw, :I420}, width: 64, height: 48, data: TestDriver.frame_data(label)] ++ opts
+    )
   end
 end

@@ -35,7 +35,7 @@ defmodule BB.Camera.StreamInfo do
         }
 
   @schema [
-    format: [type: :atom, required: true, doc: "Media format; see `BB.Camera.Format`"],
+    format: [type: :any, required: true, doc: "`{:raw, pixel_format}`; see `BB.Camera.Format`"],
     width: [type: :pos_integer, required: true, doc: "Width in pixels"],
     height: [type: :pos_integer, required: true, doc: "Height in pixels"],
     frame_rate: [
@@ -46,7 +46,7 @@ defmodule BB.Camera.StreamInfo do
     metadata: [
       type: :map,
       default: %{},
-      doc: "Format extras, e.g. `%{pixel_format: :I420}` for JPEG chroma subsampling"
+      doc: "Driver-specific extras that hold for the whole stream"
     ]
   ]
 
@@ -56,7 +56,7 @@ defmodule BB.Camera.StreamInfo do
   @spec new(keyword()) :: {:ok, t()} | {:error, term()}
   def new(opts) do
     with {:ok, opts} <- Spark.Options.validate(opts, @schema),
-         {:ok, _format} <- Format.validate(opts[:format]) do
+         {:ok, _frame_size} <- Format.frame_size(opts[:format], opts[:width], opts[:height]) do
       {:ok, struct(__MODULE__, opts)}
     end
   end

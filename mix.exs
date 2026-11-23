@@ -37,7 +37,7 @@ defmodule BB.Camera.MixProject do
 
   defp package do
     [
-      files: ~w(lib priv .formatter.exs mix.exs README* CHANGELOG* LICENSE* usage-rules.md),
+      files: ~w(lib .formatter.exs mix.exs README* CHANGELOG* LICENSE* usage-rules.md),
       maintainers: ["James Harton <james@harton.nz>"],
       licenses: ["Apache-2.0"],
       links: %{
@@ -83,11 +83,15 @@ defmodule BB.Camera.MixProject do
     [
       {:bb, bb_dep("~> 0.33")},
 
-      # Optional: only `BB.Camera.Membrane.Source` needs these, and Membrane
+      # Names raw pixel formats and knows how many bytes a frame of each takes.
+      # It depends on nothing, so it brings none of Membrane's dependency
+      # constraints with it.
+      {:membrane_raw_video_format, "~> 0.4"},
+
+      # Optional: only `BB.Camera.Membrane.Source` needs it, and Membrane
       # constrains `decimal` to ~> 2.0 through `ratio`, which a robot that
       # isn't building a media pipeline shouldn't have to accept.
       {:membrane_core, "~> 1.3", optional: true},
-      {:membrane_jpeg_format, "~> 0.1", optional: true},
 
       # Membrane's `ratio` still declares `decimal ~> 1.6 or ~> 2.0`, which
       # would hold this package's own dev/test tree down on a `decimal` with

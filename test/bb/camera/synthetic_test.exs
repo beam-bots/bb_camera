@@ -10,16 +10,16 @@ defmodule BB.Camera.SyntheticTest do
   alias BB.Camera.TestBots.{FailingCamera, FreeRunningCamera, MixedTopology, SingleCamera}
   alias BB.Message.Camera.{BeginCapture, EndCapture}
 
-  describe "built-in frames" do
-    test "are real baseline JPEGs" do
-      for frame <- Synthetic.builtin_frames() do
-        assert <<0xFF, 0xD8, 0xFF, _::binary>> = frame
-        assert binary_part(frame, byte_size(frame) - 2, 2) == <<0xFF, 0xD9>>
+  describe "default frames" do
+    test "are whole I420 frames at the size asked for" do
+      for frame <- Synthetic.default_frames(640, 480) do
+        assert {:ok, %Frame{}} =
+                 Frame.new(format: {:raw, :I420}, width: 640, height: 480, data: frame)
       end
     end
 
     test "differ from each other, so a test can tell one from the next" do
-      frames = Synthetic.builtin_frames()
+      frames = Synthetic.default_frames(160, 120)
       assert length(Enum.uniq(frames)) == length(frames)
     end
   end
@@ -48,7 +48,7 @@ defmodule BB.Camera.SyntheticTest do
           frame.data
         end
 
-      assert frames == Synthetic.builtin_frames()
+      assert frames == Synthetic.default_frames(160, 120)
     end
 
     test "stamps capture timestamps on every frame", %{session: session} do
@@ -61,25 +61,30 @@ defmodule BB.Camera.SyntheticTest do
     end
   end
 
-  describe "geometry it couldn't honour" do
+  describe "geometry" do
     setup do
       start_supervised!(MixedTopology)
       :ok
     end
 
-    test "declares what was asked for and reports what it produced" do
-      # The DSL asks for 640x480; the built-in frames are 160x120, and the
-      # camera says so as soon as capture starts rather than claiming the
-      # dimensions it was asked for.
+    test "is what it was asked for" do
       BB.subscribe(MixedTopology, [:sensor, :base, :neck, :head, :eye])
 
       {:ok, session} = Media.open(MixedTopology, :eye)
       assert_receive {:bb, _, %BB.Message{payload: %BeginCapture{stream_info: info}}}
 
-      assert info.width == 160
-      assert info.height == 120
+      assert info.width == 640
+      assert info.height == 480
+
+      :ok = Synthetic.capture_frame(MixedTopology, :eye)
+      assert {:ok, %Frame{width: 640, height: 480}} = Media.next(session, 1_000)
 
       Media.close(session)
+    end
+
+    test "must be even, since I420 halves its chroma in both directions" do
+      assert {:error, %BB.Error.Invalid.Camera.UnsupportedFormat{reason: :invalid_dimensions}} =
+               Synthetic.stream_info(width: 161, height: 120)
     end
   end
 

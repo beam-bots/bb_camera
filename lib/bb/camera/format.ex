@@ -4,62 +4,80 @@
 
 defmodule BB.Camera.Format do
   @moduledoc """
-  Which media formats `bb_camera` will carry, and why it refuses the rest.
+  Which media formats `bb_camera` will carry: raw pixels, and nothing else.
 
   `BB.Camera.Hub` keeps exactly one frame per camera and drops anything staler.
-  That policy is lossless for formats whose frames decode independently, and
-  destructive for formats whose frames reference earlier ones. So the set of
-  formats this package carries is exactly the set where dropping is safe.
+  That policy is lossless for frames that stand alone and destructive for
+  frames that reference earlier ones, so the hub only carries frames that
+  stand alone. It goes further than that and only carries *raw* frames: a
+  driver decodes whatever its device produces - MJPEG, H.264, anything - before
+  handing a frame over. Every consumer then gets pixels it can use directly,
+  rather than each one decoding the same frame for itself, and a codec whose
+  frames depend on each other is the driver's problem rather than the hub's.
 
-  Today that set is `:jpeg` - a stream of complete JPEG images, what the world
-  calls MJPEG. Raw pixel buffers would also qualify and are simply not
-  implemented yet; they are rejected as `:not_implemented` rather than
-  `:interframe`, because the distinction matters to anyone deciding whether to
-  add one.
+  A format is `{:raw, pixel_format}`, where `pixel_format` is one of
+  `Membrane.RawVideo`'s - `:I420`, `:NV12`, `:YUY2`, `:RGB` and so on - so a
+  frame can be handed to a Membrane pipeline without translating anything.
 
-  Interframe codecs are refused outright. There is no mode in which this
-  package carries H.264 and drops frames, because the result would decode to
-  garbage without anything in the pipeline noticing.
+  ## Packing
+
+  A raw frame's `data` is tightly packed: planes laid end to end in their
+  conventional order, rows with no padding between them. Its size is exactly
+  `Membrane.RawVideo.frame_size/3` for its format and dimensions. Hardware that
+  pads rows to an alignment has to have that padding stripped by its driver.
   """
 
   alias BB.Error.Invalid.Camera.UnsupportedFormat
+  alias Membrane.RawVideo
 
-  @supported [:jpeg]
+  @type pixel_format :: RawVideo.pixel_format()
 
-  @interframe [:h264, :h265, :hevc, :vp8, :vp9, :av1, :mpeg4, :theora]
-
-  @type t :: :jpeg
-
-  @doc """
-  The formats this package carries.
-  """
-  @spec supported() :: [t()]
-  def supported, do: @supported
+  @type t :: {:raw, pixel_format()}
 
   @doc """
   Whether every frame in this format decodes without reference to any other.
 
-  This is the predicate the hub's drop-the-stale-frame policy is safe under,
-  and therefore the predicate format support is gated on.
+  True of every raw format, and of nothing this package carries besides.
   """
   @spec independent_frames?(term()) :: boolean()
-  def independent_frames?(format), do: format in @supported
+  def independent_frames?({:raw, pixel_format}) when is_atom(pixel_format), do: true
+  def independent_frames?(_format), do: false
 
   @doc """
-  Check a format is one this package will carry.
+  The size in bytes of one frame in `format` at `width` x `height`, checking
+  along the way that this package will carry it.
 
-  Returns `{:error, %UnsupportedFormat{reason: :interframe}}` for codecs whose
-  frames depend on each other, and `:not_implemented` for anything else.
+  Returns `{:error, %UnsupportedFormat{}}` with a `reason` of:
+
+  - `:encoded` - anything other than `{:raw, pixel_format}`. Decode it in the
+    driver.
+  - `:unknown_pixel_format` - a raw format `Membrane.RawVideo` doesn't name.
+  - `:invalid_dimensions` - dimensions the pixel format can't take, such as an
+    odd width for chroma-subsampled `:I420`.
   """
-  @spec validate(term()) :: {:ok, t()} | {:error, UnsupportedFormat.t()}
-  def validate(format) when format in @supported, do: {:ok, format}
+  @spec frame_size(term(), pos_integer(), pos_integer()) ::
+          {:ok, pos_integer()} | {:error, UnsupportedFormat.t()}
+  def frame_size({:raw, pixel_format} = format, width, height) do
+    case RawVideo.frame_size(pixel_format, width, height) do
+      {:ok, size} ->
+        {:ok, size}
 
-  def validate(format) when format in @interframe do
-    {:error, UnsupportedFormat.exception(format: format, reason: :interframe)}
+      {:error, :invalid_pixel_format} ->
+        {:error, UnsupportedFormat.exception(format: format, reason: :unknown_pixel_format)}
+
+      {:error, :invalid_dimensions} ->
+        {:error,
+         UnsupportedFormat.exception(
+           format: format,
+           width: width,
+           height: height,
+           reason: :invalid_dimensions
+         )}
+    end
   end
 
-  def validate(format) do
-    {:error, UnsupportedFormat.exception(format: format, reason: :not_implemented)}
+  def frame_size(format, _width, _height) do
+    {:error, UnsupportedFormat.exception(format: format, reason: :encoded)}
   end
 
   @doc """

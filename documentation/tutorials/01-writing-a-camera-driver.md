@@ -30,12 +30,18 @@ interface identically.
 @impl BB.Camera
 def stream_info(opts) do
   BB.Camera.StreamInfo.new(
-    format: :jpeg,
+    format: {:raw, :I420},
     width: opts[:width],
     height: opts[:height]
   )
 end
 ```
+
+The format is always raw - `{:raw, pixel_format}` with one of
+`Membrane.RawVideo`'s pixel formats. If your device produces MJPEG, H.264 or
+anything else encoded, decode it before it reaches the hub; a capture tool
+that can decode on the way out (ffmpeg's `-f rawvideo`, `rpicam-vid --codec
+yuv420`) is the cheapest place to do it.
 
 This runs during *discovery*, against robots that are not running, with the
 options exactly as written in the DSL — parameter references unresolved,
@@ -163,11 +169,12 @@ There is no camera-specific settings channel. One schema, one way to change it.
   BB.Camera.Hub.deliver(
     state.hub,
     BB.Camera.Frame.new!(
-      format: :jpeg,
+      format: {:raw, :I420},
       width: width,
       height: height,
-      data: jpeg,
-      sequence: state.sequence
+      data: pixels,
+      sequence: state.sequence,
+      monotonic_time: captured_at
     )
   )
 ```
@@ -177,8 +184,15 @@ bound on ingress that exists: you block until the hub has taken the frame, so
 one frame per driver is ever in flight. Wrapping it in a `Task` to avoid
 blocking capture reintroduces exactly the unbounded queue it exists to prevent.
 
-Report `width` and `height` as *encoded*, not as requested — parse them out of
-the data if you can.
+Report `width` and `height` as *produced*, not as requested. Raw pixels can't
+describe themselves, so take them from what your capture tool says it is
+producing. `data` must be tightly packed - strip any row padding your hardware
+adds - and exactly the size its format and dimensions imply, or `new!/1`
+raises `BB.Error.Invalid.Camera.FrameSizeMismatch`.
+
+Stamp `monotonic_time` with when the frame was captured - for a port-based
+driver, when its last byte left the port - not when you got round to building
+the struct. The hub uses it to look up where the robot was.
 
 `sequence` must strictly increase within a capture session. The hub forgets its
 expectation whenever capture is confirmed started, so you may restart at zero
@@ -195,13 +209,15 @@ and don't duplicate them in `metadata`:
   periodically as `BB.Message.Camera.CaptureState`, once a second by default;
   accept a `:publish_rate` option and pass it to `Hub.start_link/1` so a
   robot can change that.
-- `joint_configurations` and `attached_to` — where the robot was when the
-  frame arrived, so a gimballed camera's pose can be recovered afterwards.
-  Your driver knows nothing about the robot's shape and shouldn't have to.
+- `joint_configurations` and `attached_to` — where the robot was at the
+  frame's `monotonic_time`, looked up in the robot's joint history, so a
+  gimballed camera's pose can be recovered afterwards. Your driver knows
+  nothing about the robot's shape and shouldn't have to; stamping
+  `monotonic_time` at capture is all it contributes.
 
-`metadata` is yours, and it is for what only *your* format knows — a JPEG's
-component count, its precision, whether it was progressive. Anything every
-frame has belongs in a named field, which means it belongs to `bb_camera`.
+`metadata` is yours, and it is for what only *your* driver knows — a sensor's
+exposure time, its analogue gain. Anything every frame has belongs in a named
+field, which means it belongs to `bb_camera`.
 
 ## Bounding what happens before the hub
 
@@ -227,13 +243,12 @@ shape of problem and wants the same kind of answer.
 
 `BB.Camera.Membrane.Source` is compiled only when Membrane is loaded, because
 Membrane's `ratio` pins `decimal` below what `bb` wants — and below the
-versions that fix its DoS advisories. Opting in means three additions to *your*
+versions that fix its DoS advisories. Opting in means two additions to *your*
 `mix.exs`, including the override, which Mix only honours from the top-level
 project:
 
 ```elixir
 {:membrane_core, "~> 1.3"},
-{:membrane_jpeg_format, "~> 0.1"},
 {:decimal, "~> 3.0", override: true}
 ```
 
@@ -248,7 +263,7 @@ way for a test to say "produce one now" — `BB.Camera.Synthetic.capture_frame/2
 is that function for the synthetic camera, and yours wants an equivalent:
 
 ```elixir
-{:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: :jpeg)
+{:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: {:raw, :I420})
 :ok = MyCamera.capture_frame(MyRobot, :eye)
 assert {:ok, %BB.Camera.Frame{}} = BB.Camera.Media.next(session, 1_000)
 ```

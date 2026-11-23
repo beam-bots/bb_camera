@@ -99,11 +99,19 @@ that test awkward, the change is wrong.
   than letting it read as an exact instant.
 - **`BB.Camera.Info` carries no driver options**, so device paths and
   credentials can't reach a UI through discovery.
-- **Interframe formats are refused, not dropped.** See `BB.Camera.Format`.
-- **Membrane is an optional dependency**, and the source element is compiled
-  only when it's loaded — Membrane constrains `decimal` to `~> 2.0` through
-  `ratio`, which a robot not building a media pipeline shouldn't have to
-  accept.
+- **The hub carries raw frames only, and drivers decode.** A format is
+  `{:raw, pixel_format}` with `Membrane.RawVideo`'s pixel formats, tightly
+  packed. Encoded formats - JPEG and interframe codecs alike - are refused at
+  construction rather than carried, so no consumer decodes the same frame as
+  every other, and dropping a stale frame can never cut an interframe stream
+  off from what it references. `Frame.new/1` refuses data whose size doesn't
+  match its format and dimensions, because raw pixels can't describe
+  themselves. See `BB.Camera.Format`.
+- **`membrane_core` is an optional dependency**, and the source element is
+  compiled only when it's loaded — Membrane constrains `decimal` to `~> 2.0`
+  through `ratio`, which a robot not building a media pipeline shouldn't have
+  to accept. `membrane_raw_video_format` is required: it names the pixel
+  formats and depends on nothing.
 
 ## Tests are event-driven, never timed
 

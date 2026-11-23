@@ -34,14 +34,18 @@ defmodule BB.Camera.TestDriver do
 
   use BB.Camera
 
-  alias BB.Camera.{Frame, Hub, StreamInfo}
+  alias BB.Camera.{Format, Frame, Hub, StreamInfo}
+
+  @format {:raw, :I420}
+  @width 64
+  @height 48
 
   @impl BB.Camera
   def stream_info(opts) do
     StreamInfo.new(
-      format: :jpeg,
-      width: Keyword.get(opts, :width, 64),
-      height: Keyword.get(opts, :height, 48)
+      format: @format,
+      width: Keyword.get(opts, :width, @width),
+      height: Keyword.get(opts, :height, @height)
     )
   end
 
@@ -92,20 +96,20 @@ defmodule BB.Camera.TestDriver do
     {:reply, Hub.update_stream_info(state.hub, stream_info), state}
   end
 
-  def handle_call({:test, :deliver, data}, _from, state) do
+  def handle_call({:test, :deliver, label}, _from, state) do
     frame =
       Frame.new!(
-        format: :jpeg,
-        width: 64,
-        height: 48,
-        data: data,
+        format: @format,
+        width: @width,
+        height: @height,
+        data: frame_data(label),
         sequence: state.sequence
       )
 
     {:reply, Hub.deliver(state.hub, frame), %{state | sequence: state.sequence + 1}}
   end
 
-  def handle_call({:test, :deliver_raw, frame}, _from, state) do
+  def handle_call({:test, :deliver_frame, frame}, _from, state) do
     {:reply, Hub.deliver(state.hub, frame), state}
   end
 
@@ -136,11 +140,26 @@ defmodule BB.Camera.TestDriver do
   def update_stream_info(robot, camera, stream_info),
     do: call(robot, camera, {:test, :update_stream_info, stream_info})
 
-  @doc "Hand a frame to the hub, with an auto-incrementing sequence."
-  def deliver(robot, camera, data \\ "jpeg"), do: call(robot, camera, {:test, :deliver, data})
+  @doc """
+  Hand the hub a 64x48 `:I420` frame, with an auto-incrementing sequence.
+
+  The frame's data starts with `label` and is padded with zeros to its full
+  size, so a test can tell frames apart by matching `"label" <> _`.
+  """
+  def deliver(robot, camera, label \\ "frame"),
+    do: call(robot, camera, {:test, :deliver, label})
 
   @doc "Hand a frame to the hub exactly as given."
-  def deliver_raw(robot, camera, frame), do: call(robot, camera, {:test, :deliver_raw, frame})
+  def deliver_frame(robot, camera, frame),
+    do: call(robot, camera, {:test, :deliver_frame, frame})
+
+  @doc """
+  The data of a 64x48 `:I420` frame labelled `label`, as `deliver/3` sends.
+  """
+  def frame_data(label) do
+    {:ok, size} = Format.frame_size(@format, @width, @height)
+    label <> :binary.copy(<<0>>, size - byte_size(label))
+  end
 
   defp call(robot, camera, message), do: BB.Process.call(robot, camera, message)
 end

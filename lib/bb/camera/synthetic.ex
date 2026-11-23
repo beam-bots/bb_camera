@@ -6,8 +6,8 @@ defmodule BB.Camera.Synthetic do
   @moduledoc """
   A camera with no camera behind it.
 
-  A complete `BB.Sensor` + `BB.Camera` driver that produces real JPEG frames
-  from a built-in cycle of images. Drop it anywhere a real camera would go: in
+  A complete `BB.Sensor` + `BB.Camera` driver that produces raw `:I420` frames
+  from a generated test pattern. Drop it anywhere a real camera would go: in
   tests, in a preview UI on a machine with no hardware attached, or as the
   worked example to copy when writing a driver that does talk to something.
 
@@ -32,19 +32,13 @@ defmodule BB.Camera.Synthetic do
       :ok = BB.Camera.Synthetic.capture_frame(MyRobot, :eye)
       assert_receive {:bb_camera, ^ref, %BB.Camera.Frame{}}
 
-  ## Geometry, and why it might not be what you asked for
+  ## Frames
 
-  The built-in frames are 160x120. Asking for another size without supplying
-  your own `:frames` gets you 160x120 anyway - there is no JPEG encoder here to
-  resize anything with - and the camera says so: it reports the dimensions it
-  parsed out of the actual frame through
-  `BB.Camera.Hub.capture_started/2`, so the live stream info is right even
-  though the declared one isn't.
-
-  That is not a workaround. It is exactly what a real camera does when it
-  negotiates something other than what it was asked for, and having a driver
-  that exercises the path on demand is worth more than one that pretends the
-  question never comes up.
+  By default it cycles through `default_frames/2`: vertical bars of grey that
+  shift along each frame, at whatever size it was asked for. `:I420` subsamples
+  its chroma by two in each direction, so the width and height must both be
+  even. `:frames` replaces them with your own, which must be `:I420` at the
+  configured size.
   """
 
   import BB.Unit
@@ -52,16 +46,8 @@ defmodule BB.Camera.Synthetic do
 
   use BB.Sensor,
     options_schema: [
-      width: [
-        type: :pos_integer,
-        default: 160,
-        doc: "Requested width. The built-in frames are 160 wide regardless."
-      ],
-      height: [
-        type: :pos_integer,
-        default: 120,
-        doc: "Requested height. The built-in frames are 120 high regardless."
-      ],
+      width: [type: :pos_integer, default: 160, doc: "Frame width; must be even"],
+      height: [type: :pos_integer, default: 120, doc: "Frame height; must be even"],
       clock: [
         type: {:or, [{:tuple, [{:in, [:rate]}, :any]}, {:in, [:external]}]},
         default: {:rate, 10},
@@ -77,7 +63,7 @@ defmodule BB.Camera.Synthetic do
       ],
       frames: [
         type: {:list, :string},
-        doc: "JPEG binaries to cycle through, instead of the built-in ones"
+        doc: "Raw `:I420` frames at the configured size to cycle through, instead of the defaults"
       ],
       fail_capture: [
         type: :boolean,
@@ -88,29 +74,15 @@ defmodule BB.Camera.Synthetic do
 
   use BB.Camera
 
-  alias BB.Camera.{Frame, Hub, StreamInfo}
+  alias BB.Camera.{Format, Frame, Hub, StreamInfo}
   alias BB.Error.Hardware.Camera.CaptureFailed
+  alias BB.Error.Invalid.Camera.FrameSizeMismatch
   alias BB.Robot.Units
 
-  @frame_count 4
-  @builtin_width 160
-  @builtin_height 120
-
-  @frame_paths for index <- 0..(@frame_count - 1),
-                   do:
-                     Path.join([
-                       __DIR__,
-                       "..",
-                       "..",
-                       "..",
-                       "priv",
-                       "synthetic",
-                       "frame_#{index}.jpg"
-                     ])
-
-  for path <- @frame_paths, do: @external_resource(path)
-
-  @builtin_frames Enum.map(@frame_paths, &File.read!/1)
+  @format {:raw, :I420}
+  @default_frame_count 4
+  @default_width 160
+  @default_height 120
 
   @doc """
   Produce one frame now.
@@ -142,17 +114,30 @@ defmodule BB.Camera.Synthetic do
   end
 
   @doc """
-  The JPEG frames this camera cycles through by default.
+  The `:I420` frames this camera cycles through by default at `width` x
+  `height`.
+
+  Vertical bars of grey, shifted along by a quarter of the width each frame,
+  with neutral chroma. Every frame differs from the others, so a test can tell
+  which one it was handed.
   """
-  @spec builtin_frames() :: [binary()]
-  def builtin_frames, do: @builtin_frames
+  @spec default_frames(pos_integer(), pos_integer()) :: [binary()]
+  def default_frames(width, height) do
+    chroma = :binary.copy(<<128>>, div(width, 2) * div(height, 2) * 2)
+
+    for index <- 0..(@default_frame_count - 1) do
+      shift = div(width * index, @default_frame_count)
+      row = for x <- 0..(width - 1), into: <<>>, do: <<rem((x + shift) * 4, 256)>>
+      :binary.copy(row, height) <> chroma
+    end
+  end
 
   @impl BB.Camera
   def stream_info(opts) do
     StreamInfo.new(
-      format: :jpeg,
-      width: Keyword.get(opts, :width, @builtin_width),
-      height: Keyword.get(opts, :height, @builtin_height),
+      format: @format,
+      width: Keyword.get(opts, :width, @default_width),
+      height: Keyword.get(opts, :height, @default_height),
       frame_rate: declared_frame_rate(Keyword.get(opts, :clock, {:rate, 10}))
     )
   end
@@ -160,28 +145,32 @@ defmodule BB.Camera.Synthetic do
   @impl BB.Sensor
   def init(opts) do
     opts = Map.new(opts)
-    {:ok, declared} = stream_info(Enum.to_list(opts))
-    frames = Map.get(opts, :frames) || @builtin_frames
 
-    {:ok, hub} =
-      Hub.start_link(
-        bb: opts.bb,
-        stream_info: declared,
-        publish_rate: opts.publish_rate
-      )
+    with {:ok, stream_info} <- stream_info(Enum.to_list(opts)),
+         {:ok, frames} <- frames(opts, stream_info) do
+      {:ok, hub} =
+        Hub.start_link(
+          bb: opts.bb,
+          stream_info: stream_info,
+          publish_rate: opts.publish_rate
+        )
 
-    {:ok,
-     %{
-       bb: opts.bb,
-       hub: hub,
-       frames: frames,
-       index: 0,
-       sequence: 0,
-       clock: opts.clock,
-       fail_capture: opts.fail_capture,
-       loop: BB.Loop.new(opts.bb, clock: loop_clock(opts.clock)),
-       capturing?: false
-     }}
+      {:ok,
+       %{
+         bb: opts.bb,
+         hub: hub,
+         stream_info: stream_info,
+         frames: frames,
+         index: 0,
+         sequence: 0,
+         clock: opts.clock,
+         fail_capture: opts.fail_capture,
+         loop: BB.Loop.new(opts.bb, clock: loop_clock(opts.clock)),
+         capturing?: false
+       }}
+    else
+      {:error, error} -> {:stop, error}
+    end
   end
 
   @impl BB.Sensor
@@ -195,7 +184,7 @@ defmodule BB.Camera.Synthetic do
   end
 
   def handle_info({:bb_camera, :start_capture}, state) do
-    Hub.capture_started(state.hub, actual_stream_info(state))
+    Hub.capture_started(state.hub, state.stream_info)
     {:noreply, %{state | capturing?: true, loop: BB.Loop.arm(state.loop)}}
   end
 
@@ -230,6 +219,29 @@ defmodule BB.Camera.Synthetic do
     :ok
   end
 
+  defp frames(%{frames: frames}, stream_info) when is_list(frames) do
+    {:ok, size} = Format.frame_size(stream_info.format, stream_info.width, stream_info.height)
+
+    case Enum.find(frames, &(byte_size(&1) != size)) do
+      nil ->
+        {:ok, frames}
+
+      wrong ->
+        {:error,
+         FrameSizeMismatch.exception(
+           format: stream_info.format,
+           width: stream_info.width,
+           height: stream_info.height,
+           expected: size,
+           actual: byte_size(wrong)
+         )}
+    end
+  end
+
+  defp frames(_opts, stream_info) do
+    {:ok, default_frames(stream_info.width, stream_info.height)}
+  end
+
   defp emit(state) do
     case deliver(state) do
       {:ok, state} -> state
@@ -240,9 +252,9 @@ defmodule BB.Camera.Synthetic do
   defp deliver(state) do
     frame =
       Frame.new!(
-        format: :jpeg,
-        width: @builtin_width,
-        height: @builtin_height,
+        format: state.stream_info.format,
+        width: state.stream_info.width,
+        height: state.stream_info.height,
         data: Enum.at(state.frames, rem(state.index, length(state.frames))),
         sequence: state.sequence
       )
@@ -253,15 +265,6 @@ defmodule BB.Camera.Synthetic do
       :ok -> {:ok, state}
       {:error, error} -> {:error, error, state}
     end
-  end
-
-  defp actual_stream_info(state) do
-    StreamInfo.new!(
-      format: :jpeg,
-      width: @builtin_width,
-      height: @builtin_height,
-      frame_rate: declared_frame_rate(state.clock)
-    )
   end
 
   defp declared_frame_rate(:external), do: nil

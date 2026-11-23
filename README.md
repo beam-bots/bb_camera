@@ -35,7 +35,7 @@ end
 ## Frames don't go on PubSub
 
 Everything else in `bb` publishes its readings and lets subscribers sort it
-out. Cameras can't: a 1080p MJPEG stream is tens of megabytes a second, and a
+out. Cameras can't: a raw 1080p stream is close to a hundred megabytes a second, and a
 fan-out registry with no backpressure turns one slow subscriber into an
 unbounded mailbox and then into a dead node.
 
@@ -55,7 +55,7 @@ read-in-a-loop consumer run at the camera's frame rate rather than spinning.
 Pull, for code with a loop of its own:
 
 ```elixir
-{:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: :jpeg)
+{:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: {:raw, :I420})
 {:ok, frame} = BB.Camera.Media.next(session, 2_000)
 :ok = BB.Camera.Media.close(session)
 ```
@@ -74,7 +74,7 @@ Or a Membrane pipeline, where the pipeline's demand becomes the camera's:
 
 ```elixir
 child(:camera, %BB.Camera.Membrane.Source{robot: MyRobot, camera: :eye})
-|> child(:decoder, ...)
+|> child(:encoder, ...)
 ```
 
 ## Finding cameras
@@ -87,13 +87,17 @@ through it.
 
 ## Formats
 
-JPEG, meaning a stream of complete JPEG images — what the world calls MJPEG.
+Raw pixels only: `{:raw, pixel_format}`, where `pixel_format` is one of
+`Membrane.RawVideo`'s (`:I420`, `:NV12`, `:YUY2`, `:RGB`, ...), tightly packed
+with no row padding.
 
-Interframe codecs are refused rather than carried: the hub's drop-the-stale-
-frame policy is lossless for frames that decode independently and silently
-destructive for frames that reference each other, so H.264 and its relatives
-are rejected at construction rather than corrupted at runtime. See
-`BB.Camera.Format`.
+A driver decodes whatever its device produces — MJPEG, H.264, anything —
+before handing a frame to the hub. Every consumer then gets pixels it can use
+directly instead of each decoding the same frame, and the hub's
+drop-the-stale-frame policy can never cut an interframe stream off from the
+frames it depends on. Encoded formats are rejected at construction, and a frame
+whose data isn't exactly the size its format and dimensions imply is refused.
+See `BB.Camera.Format`.
 
 ## Writing a driver
 
@@ -124,9 +128,11 @@ hardware; `bb_camera_v4l` drives Linux V4L2 devices.
 
 ## Membrane is optional
 
-`BB.Camera.Membrane.Source` needs `membrane_core` and `membrane_jpeg_format`,
-and both are **optional dependencies** — the element is compiled only when
-they're loaded. Everything else in the package works without them.
+`BB.Camera.Membrane.Source` needs `membrane_core`, which is an **optional
+dependency** — the element is compiled only when it's loaded. Everything else
+in the package works without it. (`membrane_raw_video_format`, which names the
+pixel formats, is a required dependency, but it depends on nothing and brings
+none of what follows with it.)
 
 That is not tidiness. Membrane depends on `ratio`, which declares
 `decimal ~> 1.6 or ~> 2.0`, while `bb` wants `decimal 3.x` through `localize`.
@@ -134,7 +140,7 @@ A robot that isn't building a media pipeline shouldn't be dragged down to a
 `decimal` it doesn't want — and `decimal 2.4.1` carries two open DoS
 advisories, so being dragged there also fails `mix hex.audit`.
 
-If you want the source element, add all three lines:
+If you want the source element, add both lines:
 
 ```elixir
 def deps do
@@ -143,7 +149,6 @@ def deps do
     {:bb_camera, "~> 0.1"},
 
     {:membrane_core, "~> 1.3"},
-    {:membrane_jpeg_format, "~> 0.1"},
 
     # `ratio` pins `decimal` below what `bb` wants and below the versions that
     # fix CVE-2026-97853 and CVE-2026-32686. `ratio` treats `decimal` as
@@ -158,7 +163,7 @@ from the top-level project, so the copy `bb_camera` carries for its own
 dev/test tree does nothing for you.
 
 If you skip the override you'll resolve to `decimal 2.4.1` and `mix hex.audit`
-will fail. If you skip the Membrane deps entirely, `BB.Camera.Membrane.Source`
+will fail. If you skip `membrane_core` entirely, `BB.Camera.Membrane.Source`
 simply won't exist — `Code.ensure_loaded?/1` is the way to check for it at
 runtime.
 

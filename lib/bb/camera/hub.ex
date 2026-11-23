@@ -14,8 +14,8 @@ defmodule BB.Camera.Hub do
 
   A camera has one physical capture no matter how many things want to watch it,
   and image data is large enough that the usual answer - publish and let
-  subscribers sort it out - stops working. A 1080p MJPEG stream is tens of
-  megabytes a second; put that through a fan-out registry with no backpressure
+  subscribers sort it out - stops working. A raw 1080p stream is close to a
+  hundred megabytes a second; put that through a fan-out registry with no backpressure
   and a single slow consumer becomes an unbounded mailbox and then a dead node.
   So frames do not go on `BB.PubSub` at all. They come through here, and here
   there are bounds at both ends:
@@ -28,8 +28,8 @@ defmodule BB.Camera.Hub do
   * **Egress** - a consumer gets a frame only when it has asked for one, one at
     a time, and only one strictly newer than the last it received.
 
-  That last clause is what makes a `next`-in-a-loop consumer - an HTTP MJPEG
-  route, say - run at the camera's frame rate rather than spinning: there is
+  That last clause is what makes a `next`-in-a-loop consumer - an HTTP route
+  streaming to a browser, say - run at the camera's frame rate rather than spinning: there is
   nothing to return until the camera produces something new.
 
   The interface is deliberately source-agnostic. A driver reading a V4L2 device
