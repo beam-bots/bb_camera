@@ -57,11 +57,16 @@ defmodule BB.Camera.Frame do
 
   ## Where the camera was
 
-  A camera on a gimbal is somewhere different in every frame, and the pose it
-  had when a frame was captured cannot be recovered afterwards - by the time
-  anyone asks, the joints have moved. So the hub stamps
+  A camera on a gimbal is somewhere different in every frame, and by the time
+  anyone asks where it was pointing, the joints have moved. So the hub stamps
   `joint_configurations` onto each frame as it passes through: every joint's
-  configuration, read from the robot's state as the frame arrived.
+  configuration at the frame's `monotonic_time`, looked up in the robot's joint
+  history (see `BB.Robot.State.get_all_configurations_at/2`).
+
+  That makes `monotonic_time` matter beyond display. A driver that stamps it
+  when the frame was captured gets the pose at capture, however long the frame
+  then spent in a pipe or a decoder; one that leaves it to default gets the pose
+  when the struct was built.
 
   `attached_to` says where the camera hangs - `{:link, name}`, `{:joint,
   name}` or `:robot` - which is what turns those configurations into a pose:
@@ -82,10 +87,14 @@ defmodule BB.Camera.Frame do
   one more table read per joint and answers questions the camera's chain
   can't, such as where the gripper was in this picture.
 
-  **This is the most recently known configuration, not the configuration at
-  the shutter.** Joint state is only as fresh as the last estimator update
-  that wrote it. A joint reporting at 100Hz is tighter than a 30fps frame
-  interval; a slow encoder is not, and nothing here can make it so.
+  **It is only as exact as the joint state behind it.** History interpolates
+  between a joint's reports, so a joint reporting at 100Hz is placed well
+  within a 30fps frame interval; a slow encoder is not, and nothing here can
+  make it so. A report still in flight when the frame is stamped isn't used:
+  the joint's previous report is. Where history can't answer at all - the
+  robot runs with `joint_history false`, or the frame predates the history,
+  as around a `BB.Robot.Runtime` restart - the frame carries the configuration
+  current as it reached the hub.
   """
 
   alias BB.Camera.Format
