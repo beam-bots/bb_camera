@@ -73,8 +73,10 @@ calls its `handle_options/2`.
   messages.
 - `BB.Camera.Membrane.Source` when you have a pipeline.
 
-Assert the format you can handle (`format: :jpeg`) at `open/3` or
-`subscribe/3`. Being told at open is better than discovering it from the bytes.
+Frames are always raw: `{:raw, pixel_format}` with `Membrane.RawVideo`'s pixel
+formats, tightly packed. Assert the one you can handle
+(`format: {:raw, :I420}`) at `open/3` or `subscribe/3`. Being told at open is
+better than discovering it from the bytes.
 
 Treat any `{:error, _}` from `next/2` as a reason to stop streaming. The
 distinctions matter for diagnostics, not for control flow.
@@ -89,11 +91,12 @@ fields the hub stamps that you get for free:
   claims on purpose.
 - `joint_configurations` — every joint's configuration as at capture, so a
   gimballed camera's pose is recoverable later. Feed it to
-  `BB.Robot.Kinematics.forward_kinematics/3` with `attached_to`. It is the most
-  recently known configuration, not the one at the shutter.
+  `BB.Robot.Kinematics.forward_kinematics/3` with `attached_to`. It is looked
+  up in the robot's joint history at the frame's `monotonic_time`, so it is as
+  exact as the joint reports behind it.
 - `attached_to` — `{:link, name}`, `{:joint, name}` or `:robot`.
 
-`metadata` is for format-specific extras only (a JPEG's component count). Don't
+`metadata` is for driver-specific extras only (a sensor's exposure time). Don't
 put anything in it that every frame has.
 
 ## Discovering

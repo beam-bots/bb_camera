@@ -20,7 +20,7 @@ defmodule BB.Camera do
   ## Frames do not go on PubSub
 
   Everything else in `bb` publishes its readings and lets subscribers sort it
-  out. Cameras cannot: a 1080p MJPEG stream is tens of megabytes a second, and
+  out. Cameras cannot: a raw 1080p stream is close to a hundred megabytes a second, and
   a fan-out registry with no backpressure turns one slow subscriber into an
   unbounded mailbox. So `BB.PubSub` carries camera *lifecycle* only - capture
   started and ended - and frames travel over the bounded interface
@@ -34,7 +34,7 @@ defmodule BB.Camera do
   Two shapes over the same mechanism. Pull, which suits anything with its own
   loop - an HTTP route writing chunks, say:
 
-      {:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: :jpeg)
+      {:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: {:raw, :I420})
       {:ok, frame} = BB.Camera.Media.next(session, 2_000)
       :ok = BB.Camera.Media.close(session)
 
@@ -66,7 +66,11 @@ defmodule BB.Camera do
 
         @impl BB.Camera
         def stream_info(opts) do
-          BB.Camera.StreamInfo.new(format: :jpeg, width: opts[:width], height: opts[:height])
+          BB.Camera.StreamInfo.new(
+            format: {:raw, :I420},
+            width: opts[:width],
+            height: opts[:height]
+          )
         end
 
         @impl BB.Sensor
@@ -188,8 +192,8 @@ defmodule BB.Camera do
   ## Options
 
   - `:format` - assert the camera produces this format, failing loudly if it
-    doesn't. A consumer that can only handle JPEG should say so here rather
-    than discover it from the bytes.
+    doesn't. A consumer that can only handle one pixel format should say so
+    here rather than discover it from the bytes.
   - `:owner` - the process frames are sent to, defaulting to the caller. The
     hub monitors it and unsubscribes automatically when it dies, so a crashed
     consumer releases the capture rather than pinning it.

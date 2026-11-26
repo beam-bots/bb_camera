@@ -89,6 +89,38 @@ defmodule BB.Camera.TestBots.GimbalCamera do
   end
 end
 
+defmodule BB.Camera.TestBots.GimbalCameraWithoutHistory do
+  @moduledoc """
+  `GimbalCamera` on a robot that keeps no joint history, so the hub has
+  nothing to look a frame's capture time up in.
+  """
+  use BB
+
+  settings do
+    name(:bb_camera_gimbal_without_history)
+    joint_history(false)
+  end
+
+  topology do
+    link :base do
+      joint :pan do
+        type(:revolute)
+
+        limit(
+          lower: ~u(-90 degree),
+          upper: ~u(90 degree),
+          velocity: ~u(60 degree_per_second),
+          effort: ~u(1 newton_meter)
+        )
+
+        link :head do
+          sensor(:eye, {BB.Camera.Synthetic, clock: :external})
+        end
+      end
+    end
+  end
+end
+
 defmodule BB.Camera.TestBots.MixedTopology do
   @moduledoc """
   Cameras at every attachment point, plus a sensor that isn't one.

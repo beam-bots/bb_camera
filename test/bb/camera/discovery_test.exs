@@ -45,7 +45,7 @@ defmodule BB.Camera.DiscoveryTest do
 
       assert cameras[:eye].stream_info.width == 640
       assert cameras[:eye].stream_info.height == 480
-      assert cameras[:eye].stream_info.format == :jpeg
+      assert cameras[:eye].stream_info.format == {:raw, :I420}
     end
 
     test "carries no driver options, so device paths can't leak into a UI" do
@@ -87,7 +87,7 @@ defmodule BB.Camera.DiscoveryTest do
   describe "stream_info/2" do
     test "reports the declared format for a stopped camera" do
       assert {:ok, info} = Camera.stream_info(SingleCamera, :eye)
-      assert info.format == :jpeg
+      assert info.format == {:raw, :I420}
     end
 
     test "names the cameras it does know about when asked for one it doesn't" do

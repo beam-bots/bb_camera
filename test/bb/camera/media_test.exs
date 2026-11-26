@@ -15,17 +15,17 @@ defmodule BB.Camera.MediaTest do
   describe "against the synthetic camera" do
     setup do
       start_supervised!(SingleCamera)
-      {:ok, session} = Media.open(SingleCamera, :eye, format: :jpeg)
+      {:ok, session} = Media.open(SingleCamera, :eye, format: {:raw, :I420})
       on_exit(fn -> Media.close(session) end)
       %{session: session}
     end
 
-    test "next/2 returns a real JPEG", %{session: session} do
+    test "next/2 returns a whole raw frame", %{session: session} do
       :ok = Synthetic.capture_frame(SingleCamera, :eye)
 
       assert {:ok, %Frame{} = frame} = Media.next(session, 1_000)
-      assert frame.format == :jpeg
-      assert <<0xFF, 0xD8, _::binary>> = frame.data
+      assert frame.format == {:raw, :I420}
+      assert byte_size(frame.data) == div(frame.width * frame.height * 3, 2)
     end
 
     test "successive calls return successive frames", %{session: session} do
@@ -65,7 +65,7 @@ defmodule BB.Camera.MediaTest do
   describe "a loop over next/2" do
     setup do
       start_supervised!(SingleCamera)
-      {:ok, session} = Media.open(SingleCamera, :eye, format: :jpeg)
+      {:ok, session} = Media.open(SingleCamera, :eye, format: {:raw, :I420})
       on_exit(fn -> Media.close(session) end)
       %{session: session}
     end
@@ -73,7 +73,7 @@ defmodule BB.Camera.MediaTest do
     test "is bounded by the camera, not by the processor", %{session: session} do
       # Three frames exist; a fourth call has nothing newer to return and must
       # time out rather than re-serve the third. This is exactly the loop an
-      # MJPEG HTTP route runs, and the reason it doesn't spin.
+      # HTTP streaming route runs, and the reason it doesn't spin.
       for _ <- 1..3, do: :ok = Synthetic.capture_frame(SingleCamera, :eye)
 
       assert {:ok, _} = Media.next(session, 1_000)

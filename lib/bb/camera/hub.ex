@@ -14,8 +14,8 @@ defmodule BB.Camera.Hub do
 
   A camera has one physical capture no matter how many things want to watch it,
   and image data is large enough that the usual answer - publish and let
-  subscribers sort it out - stops working. A 1080p MJPEG stream is tens of
-  megabytes a second; put that through a fan-out registry with no backpressure
+  subscribers sort it out - stops working. A raw 1080p stream is close to a
+  hundred megabytes a second; put that through a fan-out registry with no backpressure
   and a single slow consumer becomes an unbounded mailbox and then a dead node.
   So frames do not go on `BB.PubSub` at all. They come through here, and here
   there are bounds at both ends:
@@ -28,8 +28,8 @@ defmodule BB.Camera.Hub do
   * **Egress** - a consumer gets a frame only when it has asked for one, one at
     a time, and only one strictly newer than the last it received.
 
-  That last clause is what makes a `next`-in-a-loop consumer - an HTTP MJPEG
-  route, say - run at the camera's frame rate rather than spinning: there is
+  That last clause is what makes a `next`-in-a-loop consumer - an HTTP route
+  streaming to a browser, say - run at the camera's frame rate rather than spinning: there is
   nothing to return until the camera produces something new.
 
   The interface is deliberately source-agnostic. A driver reading a V4L2 device
@@ -374,7 +374,7 @@ defmodule BB.Camera.Hub do
             measured_frame_rate: state.measured_frame_rate,
             requested_frame_rate: state.stream_info.frame_rate,
             attached_to: state.attached_to,
-            joint_configurations: joint_configurations(state)
+            joint_configurations: joint_configurations(state, frame)
         }
 
         state =
@@ -668,12 +668,24 @@ defmodule BB.Camera.Hub do
   # ----------------------------------------------------------------------------
 
   # A camera on a gimbal is somewhere different in every frame, and once the
-  # joints have moved there is no recovering where it was. Reading the state
-  # table is cheap enough to do per frame; computing the transform is not, and
-  # is reproducible later from this, so it isn't done here.
-  defp joint_configurations(%{robot_state: nil}), do: %{}
+  # joints have moved there is no recovering where it was - except from the
+  # robot's joint history, which is asked for the configuration at the frame's
+  # own capture time rather than at whatever moment it reached the hub. Reading
+  # it is cheap enough to do per frame; computing the transform is not, and is
+  # reproducible later from this, so it isn't done here.
+  #
+  # When history can't answer - it's turned off, or the frame was captured
+  # before it began, as around a `Runtime` restart - the configuration current
+  # as the frame arrives is the best there is, and is what a frame carried
+  # before history existed.
+  defp joint_configurations(%{robot_state: nil}, _frame), do: %{}
 
-  defp joint_configurations(state), do: RobotState.get_all_configurations(state.robot_state)
+  defp joint_configurations(state, frame) do
+    case RobotState.get_all_configurations_at(state.robot_state, frame.monotonic_time) do
+      {:ok, configurations} -> configurations
+      {:error, _cannot_answer} -> RobotState.get_all_configurations(state.robot_state)
+    end
+  end
 
   # The robot struct records where every sensor in the topology hangs, so this
   # reads it rather than deriving it a second time. It is compile-time data,

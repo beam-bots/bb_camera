@@ -10,7 +10,7 @@ defmodule BB.Camera.Media do
   that would rather block than handle messages - an HTTP route writing chunks
   to a browser being the obvious case:
 
-      {:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: :jpeg)
+      {:ok, session} = BB.Camera.Media.open(MyRobot, :eye, format: {:raw, :I420})
 
       Stream.repeatedly(fn -> BB.Camera.Media.next(session, 2_000) end)
       |> Enum.reduce_while(conn, fn
@@ -43,8 +43,8 @@ defmodule BB.Camera.Media do
   ## Options
 
   - `:format` - assert the camera produces this format. A consumer that can
-    only render JPEG should say `format: :jpeg` and be told so here, rather
-    than find out from the bytes.
+    only read `:I420` should say `format: {:raw, :I420}` and be told so here,
+    rather than find out from the bytes.
   - `:owner` - the process the session belongs to, defaulting to the caller.
     The hub monitors it, so a disconnected browser or a crashed route releases
     the capture.

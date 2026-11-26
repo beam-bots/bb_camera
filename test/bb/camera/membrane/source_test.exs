@@ -20,17 +20,23 @@ defmodule BB.Camera.Membrane.SourceTest do
       :ok
     end
 
-    test "a sink downstream of the source receives the camera's JPEG frames" do
+    test "a sink downstream of the source receives the camera's raw frames" do
       BB.subscribe(SingleCamera, [:sensor, :head, :eye])
       pipeline = start_pipeline(SingleCamera, :eye)
 
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{width: 160, height: 120})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{
+        width: 160,
+        height: 120,
+        pixel_format: :I420,
+        aligned: true
+      })
+
       :ok = await_capture()
 
       :ok = Synthetic.capture_frame(SingleCamera, :eye)
 
       assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: payload})
-      assert <<0xFF, 0xD8, _::binary>> = payload
+      assert payload == hd(Synthetic.default_frames(160, 120))
 
       Testing.Pipeline.terminate(pipeline)
     end
@@ -38,7 +44,7 @@ defmodule BB.Camera.Membrane.SourceTest do
     test "successive frames arrive in order with increasing sequence metadata" do
       BB.subscribe(SingleCamera, [:sensor, :head, :eye])
       pipeline = start_pipeline(SingleCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{})
       :ok = await_capture()
 
       # One frame at a time, each asserted before the next is produced. The
@@ -60,7 +66,7 @@ defmodule BB.Camera.Membrane.SourceTest do
     test "presentation timestamps start at zero and advance" do
       BB.subscribe(SingleCamera, [:sensor, :head, :eye])
       pipeline = start_pipeline(SingleCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{})
       :ok = await_capture()
 
       :ok = Synthetic.capture_frame(SingleCamera, :eye)
@@ -92,7 +98,7 @@ defmodule BB.Camera.Membrane.SourceTest do
 
       assert_receive {:driver, :start_capture}
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{})
 
       hub = BB.Process.whereis(GatedCamera, {:camera, :eye})
 
@@ -106,13 +112,14 @@ defmodule BB.Camera.Membrane.SourceTest do
 
       assert_receive {:driver, :start_capture}
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{})
 
       # Each frame is collected before the next is produced. A pipeline keeping
       # up sees every frame; this asserts that, and nothing about scheduling.
       for n <- 1..3 do
-        payload = "frame-#{n}"
-        :ok = TestDriver.deliver(GatedCamera, :eye, payload)
+        label = "frame-#{n}"
+        payload = TestDriver.frame_data(label)
+        :ok = TestDriver.deliver(GatedCamera, :eye, label)
         assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: ^payload})
       end
 
@@ -124,11 +131,12 @@ defmodule BB.Camera.Membrane.SourceTest do
 
       assert_receive {:driver, :start_capture}
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{})
 
       for n <- 1..4 do
-        payload = "produced-#{n}"
-        :ok = TestDriver.deliver(GatedCamera, :eye, payload)
+        label = "produced-#{n}"
+        payload = TestDriver.frame_data(label)
+        :ok = TestDriver.deliver(GatedCamera, :eye, label)
         assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: ^payload})
       end
 
@@ -160,22 +168,22 @@ defmodule BB.Camera.Membrane.SourceTest do
 
       assert_receive {:driver, :start_capture}
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{width: 64, height: 48})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{width: 64, height: 48})
 
       :ok = TestDriver.deliver(GatedCamera, :eye, "small")
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "small"})
+      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "small" <> _})
 
       :ok =
         TestDriver.update_stream_info(
           GatedCamera,
           :eye,
-          StreamInfo.new!(format: :jpeg, width: 320, height: 240)
+          StreamInfo.new!(format: {:raw, :I420}, width: 320, height: 240)
         )
 
       :ok = TestDriver.deliver(GatedCamera, :eye, "large")
 
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{width: 320, height: 240})
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "large"})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{width: 320, height: 240})
+      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "large" <> _})
 
       Testing.Pipeline.terminate(pipeline)
     end
@@ -185,7 +193,7 @@ defmodule BB.Camera.Membrane.SourceTest do
 
       assert_receive {:driver, :start_capture}
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{})
 
       :ok = TestDriver.confirm_stop(GatedCamera, :eye)
 
@@ -207,7 +215,7 @@ defmodule BB.Camera.Membrane.SourceTest do
 
       assert_receive {:driver, :start_capture}
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{})
 
       :ok = TestDriver.confirm_stop(GatedCamera, :eye)
       assert_end_of_stream(pipeline, :sink)
@@ -233,7 +241,15 @@ defmodule BB.Camera.Membrane.SourceTest do
       # element has to tolerate one. Exercised directly: there is no way to
       # time the arrival of an in-flight message through a live pipeline
       # without guessing, and guessing is what these tests don't do.
-      frame = Frame.new!(format: :jpeg, width: 64, height: 48, data: "too-late", sequence: 9)
+      frame =
+        Frame.new!(
+          format: {:raw, :I420},
+          width: 64,
+          height: 48,
+          data: TestDriver.frame_data("too-late"),
+          sequence: 9
+        )
+
       released = %{subscription: nil, demand: 1, epoch: nil}
 
       assert {[], ^released} = Source.handle_info({:bb_camera, make_ref(), frame}, nil, released)
@@ -247,10 +263,10 @@ defmodule BB.Camera.Membrane.SourceTest do
 
       assert_receive {:driver, :start_capture}
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
-      assert_sink_stream_format(pipeline, :sink, %Membrane.JPEG{})
+      assert_sink_stream_format(pipeline, :sink, %Membrane.RawVideo{})
 
       :ok = TestDriver.deliver(GatedCamera, :eye, "before-restart")
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "before-restart"})
+      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "before-restart" <> _})
 
       # Capture ends with the element still subscribed and Membrane's demand
       # still outstanding. The hub spends the demand of everyone it told the
@@ -262,7 +278,7 @@ defmodule BB.Camera.Membrane.SourceTest do
       :ok = TestDriver.confirm_start(GatedCamera, :eye)
 
       :ok = TestDriver.deliver(GatedCamera, :eye, "after-restart")
-      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "after-restart"})
+      assert_sink_buffer(pipeline, :sink, %Membrane.Buffer{payload: "after-restart" <> _})
 
       Testing.Pipeline.terminate(pipeline)
     end
@@ -278,8 +294,7 @@ defmodule BB.Camera.Membrane.SourceTest do
         })
 
       # The robot isn't running, so there is nothing to subscribe to. The
-      # element refuses to exist rather than starting and failing later, which
-      # is the same path an interframe format takes.
+      # element refuses to exist rather than starting and failing later.
       assert_raise BB.Error.State.Camera.NotRunning, fn ->
         Source.handle_setup(nil, state)
       end

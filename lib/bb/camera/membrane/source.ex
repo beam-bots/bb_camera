@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) do
+if Code.ensure_loaded?(Membrane.Source) do
   defmodule BB.Camera.Membrane.Source do
     @moduledoc """
     A `Membrane.Source` that reads from a BB camera.
@@ -20,15 +20,16 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
 
     ## Format
 
-    The output pad carries `Membrane.JPEG`, the standard format struct, so
-    downstream Membrane JPEG elements interoperate without a shim. The element
-    re-emits it whenever the camera renegotiates its geometry - the camera tells
-    consumers before the first frame encoded the new way, so the format a
-    downstream element holds always matches the buffer it is about to receive.
+    The output pad carries `Membrane.RawVideo`, the standard format struct, so
+    downstream Membrane elements - a scaler, a pixel format converter, an
+    encoder - interoperate without a shim. The element re-emits it whenever the
+    camera renegotiates its geometry - the camera tells consumers before the
+    first frame produced the new way, so the format a downstream element holds
+    always matches the buffer it is about to receive.
 
-    `pixel_format` comes from `stream_info.metadata[:pixel_format]` and is `nil`
-    when the driver doesn't report chroma subsampling, which `Membrane.JPEG`
-    permits.
+    Each buffer is one whole frame, so the format is `aligned: true`.
+    `framerate` is `nil`: a camera's rate is nominal at best, and every buffer
+    carries a `pts`, which is what `Membrane.RawVideo` asks for instead.
 
     ## Timestamps
 
@@ -39,13 +40,6 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
     `metadata.bb_camera` for anything that needs to correlate a buffer with the
     rest of the robot's telemetry.
 
-    ## Formats it refuses
-
-    Constructing the element against a camera whose format this package won't
-    carry fails at setup rather than at the first buffer. See
-    `BB.Camera.Format` - the short version is that an interframe codec cannot
-    survive the frame-dropping this interface is built on, so it is refused
-    rather than corrupted.
     """
 
     use Membrane.Source
@@ -53,6 +47,7 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
     alias BB.Camera
     alias BB.Camera.Frame
     alias Membrane.Buffer
+    alias Membrane.RawVideo
 
     def_options(
       robot: [
@@ -73,7 +68,7 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
       ]
     )
 
-    def_output_pad(:output, accepted_format: %Membrane.JPEG{}, flow_control: :manual)
+    def_output_pad(:output, accepted_format: %RawVideo{aligned: true}, flow_control: :manual)
 
     @impl true
     def handle_init(_ctx, opts) do
@@ -91,7 +86,7 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
 
     @impl true
     def handle_setup(_ctx, state) do
-      case Camera.subscribe(state.robot, state.camera, format: :jpeg) do
+      case Camera.subscribe(state.robot, state.camera) do
         {:ok, subscription} ->
           {[], %{state | subscription: subscription, stream_info: subscription.stream_info}}
 
@@ -186,14 +181,16 @@ if Code.ensure_loaded?(Membrane.Source) and Code.ensure_loaded?(Membrane.JPEG) d
 
     defp stream_format_action(%{stream_info: nil}), do: []
 
-    defp stream_format_action(%{stream_info: stream_info}) do
+    defp stream_format_action(%{stream_info: %{format: {:raw, pixel_format}} = stream_info}) do
       [
         stream_format:
           {:output,
-           %Membrane.JPEG{
+           %RawVideo{
              width: stream_info.width,
              height: stream_info.height,
-             pixel_format: Map.get(stream_info.metadata, :pixel_format)
+             pixel_format: pixel_format,
+             framerate: nil,
+             aligned: true
            }}
       ]
     end

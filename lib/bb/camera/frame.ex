@@ -4,7 +4,7 @@
 
 defmodule BB.Camera.Frame do
   @moduledoc """
-  One independently decodable frame of media.
+  One raw frame: pixels, and what is needed to read them.
 
   Deliberately *not* a `BB.Message`. Frames never travel over `BB.PubSub` -
   they go over the bounded interface `BB.Camera.Hub` serves, and nowhere else.
@@ -13,10 +13,12 @@ defmodule BB.Camera.Frame do
 
   ## Dimensions
 
-  `width` and `height` are the dimensions the frame is *actually* encoded at,
-  which is not necessarily what the camera was asked for. A driver that can
-  parse them out of the data - the SOF marker of a JPEG, say - should do so
-  rather than echoing back its own request.
+  `width` and `height` are the frame's *actual* dimensions, which are not
+  necessarily what the camera was asked for. Raw pixels don't describe
+  themselves, so these and `format` are all a consumer has to read `data` by.
+  A driver should take them from what its capture tool reports it is
+  producing, not echo back its own request, and `new/1` refuses data whose
+  size doesn't match them.
 
   ## Timestamps
 
@@ -52,16 +54,21 @@ defmodule BB.Camera.Frame do
 
   They are named fields rather than `metadata` keys because every frame has
   them whatever the driver is. `metadata` is for what only some drivers know -
-  a JPEG's component count, say - and nothing should go in it that the
+  a sensor's exposure time, say - and nothing should go in it that the
   framework puts on every frame.
 
   ## Where the camera was
 
-  A camera on a gimbal is somewhere different in every frame, and the pose it
-  had when a frame was captured cannot be recovered afterwards - by the time
-  anyone asks, the joints have moved. So the hub stamps
+  A camera on a gimbal is somewhere different in every frame, and by the time
+  anyone asks where it was pointing, the joints have moved. So the hub stamps
   `joint_configurations` onto each frame as it passes through: every joint's
-  configuration, read from the robot's state as the frame arrived.
+  configuration at the frame's `monotonic_time`, looked up in the robot's joint
+  history (see `BB.Robot.State.get_all_configurations_at/2`).
+
+  That makes `monotonic_time` matter beyond display. A driver that stamps it
+  when the frame was captured gets the pose at capture, however long the frame
+  then spent in a pipe or a decoder; one that leaves it to default gets the pose
+  when the struct was built.
 
   `attached_to` says where the camera hangs - `{:link, name}`, `{:joint,
   name}` or `:robot` - which is what turns those configurations into a pose:
@@ -82,13 +89,18 @@ defmodule BB.Camera.Frame do
   one more table read per joint and answers questions the camera's chain
   can't, such as where the gripper was in this picture.
 
-  **This is the most recently known configuration, not the configuration at
-  the shutter.** Joint state is only as fresh as the last estimator update
-  that wrote it. A joint reporting at 100Hz is tighter than a 30fps frame
-  interval; a slow encoder is not, and nothing here can make it so.
+  **It is only as exact as the joint state behind it.** History interpolates
+  between a joint's reports, so a joint reporting at 100Hz is placed well
+  within a 30fps frame interval; a slow encoder is not, and nothing here can
+  make it so. A report still in flight when the frame is stamped isn't used:
+  the joint's previous report is. Where history can't answer at all - the
+  robot runs with `joint_history false`, or the frame predates the history,
+  as around a `BB.Robot.Runtime` restart - the frame carries the configuration
+  current as it reached the hub.
   """
 
   alias BB.Camera.Format
+  alias BB.Error.Invalid.Camera.FrameSizeMismatch
 
   defstruct [
     :format,
@@ -121,13 +133,13 @@ defmodule BB.Camera.Frame do
         }
 
   @schema [
-    format: [type: :atom, required: true, doc: "Media format; see `BB.Camera.Format`"],
-    width: [type: :pos_integer, required: true, doc: "Encoded width in pixels"],
-    height: [type: :pos_integer, required: true, doc: "Encoded height in pixels"],
+    format: [type: :any, required: true, doc: "`{:raw, pixel_format}`; see `BB.Camera.Format`"],
+    width: [type: :pos_integer, required: true, doc: "Width in pixels"],
+    height: [type: :pos_integer, required: true, doc: "Height in pixels"],
     data: [
       type: {:custom, __MODULE__, :validate_binary, []},
       required: true,
-      doc: "The encoded frame"
+      doc: "The frame's pixels, tightly packed"
     ],
     sequence: [
       type: {:or, [:non_neg_integer, nil]},
@@ -162,7 +174,7 @@ defmodule BB.Camera.Frame do
     metadata: [
       type: :map,
       default: %{},
-      doc: "Format-specific extras, such as a JPEG's component count"
+      doc: "Driver-specific extras, such as a sensor's exposure time"
     ]
   ]
 
@@ -172,7 +184,8 @@ defmodule BB.Camera.Frame do
   @spec new(keyword()) :: {:ok, t()} | {:error, term()}
   def new(opts) do
     with {:ok, opts} <- Spark.Options.validate(opts, @schema),
-         {:ok, _format} <- Format.validate(opts[:format]) do
+         {:ok, size} <- Format.frame_size(opts[:format], opts[:width], opts[:height]),
+         :ok <- check_size(opts[:data], size, opts) do
       {:ok,
        struct(
          __MODULE__,
@@ -201,4 +214,17 @@ defmodule BB.Camera.Frame do
   @doc false
   def validate_binary(value) when is_binary(value), do: {:ok, value}
   def validate_binary(value), do: {:error, "expected a binary, got: #{inspect(value)}"}
+
+  defp check_size(data, size, _opts) when byte_size(data) == size, do: :ok
+
+  defp check_size(data, size, opts) do
+    {:error,
+     FrameSizeMismatch.exception(
+       format: opts[:format],
+       width: opts[:width],
+       height: opts[:height],
+       expected: size,
+       actual: byte_size(data)
+     )}
+  end
 end

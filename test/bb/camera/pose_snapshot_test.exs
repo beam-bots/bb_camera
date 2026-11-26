@@ -10,7 +10,7 @@ defmodule BB.Camera.PoseSnapshotTest do
   use ExUnit.Case, async: false
 
   alias BB.Camera.{Media, Synthetic}
-  alias BB.Camera.TestBots.{GimbalCamera, MixedTopology}
+  alias BB.Camera.TestBots.{GimbalCamera, GimbalCameraWithoutHistory, MixedTopology}
   alias BB.Robot.Kinematics
   alias BB.Robot.Runtime
   alias BB.Robot.State, as: RobotState
@@ -40,10 +40,24 @@ defmodule BB.Camera.PoseSnapshotTest do
       %{state: Runtime.get_robot_state(GimbalCamera)}
     end
 
-    test "are the ones that were current when the frame arrived", %{state: state} do
+    test "are the ones in effect when the frame was captured", %{state: state} do
       :ok = RobotState.set_configuration(state, :pan, 0.25)
 
       assert capture_one(GimbalCamera, :eye).joint_configurations == %{pan: 0.25}
+    end
+
+    test "are looked up at the frame's capture time, not taken as they stand on arrival",
+         %{state: state} do
+      :ok = RobotState.set_configuration(state, :pan, 0.25)
+
+      # A report that is already the robot's current configuration, but is for
+      # a moment after this frame is captured. Read on arrival, the frame would
+      # carry it; looked up at capture, it can't have happened yet.
+      later = System.monotonic_time(:nanosecond) + 60_000_000_000
+      :ok = RobotState.set_configuration(state, :pan, -0.5, later)
+
+      assert capture_one(GimbalCamera, :eye).joint_configurations == %{pan: 0.25}
+      assert RobotState.get_all_configurations(state) == %{pan: -0.5}
     end
 
     test "do not change under a frame once the joint has moved on", %{state: state} do
@@ -69,6 +83,21 @@ defmodule BB.Camera.PoseSnapshotTest do
       robot = GimbalCamera.robot()
 
       refute transform_of(robot, straight_ahead) == transform_of(robot, turned)
+    end
+  end
+
+  describe "on a robot that keeps no joint history" do
+    setup do
+      start_supervised!(GimbalCameraWithoutHistory)
+      %{state: Runtime.get_robot_state(GimbalCameraWithoutHistory)}
+    end
+
+    test "are the ones current when the frame arrived", %{state: state} do
+      :ok = RobotState.set_configuration(state, :pan, 0.25)
+      later = System.monotonic_time(:nanosecond) + 60_000_000_000
+      :ok = RobotState.set_configuration(state, :pan, -0.5, later)
+
+      assert capture_one(GimbalCameraWithoutHistory, :eye).joint_configurations == %{pan: -0.5}
     end
   end
 
