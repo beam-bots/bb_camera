@@ -81,7 +81,8 @@ defmodule BB.Camera.MixProject do
 
   defp deps do
     [
-      {:bb, bb_dep("~> 0.33")},
+      # 0.33.1 for joint history, which frames are stamped from.
+      {:bb, bb_dep("~> 0.33 and >= 0.33.1")},
 
       # Names raw pixel formats and knows how many bytes a frame of each takes.
       # It depends on nothing, so it brings none of Membrane's dependency
