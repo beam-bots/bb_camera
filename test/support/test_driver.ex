@@ -54,9 +54,15 @@ defmodule BB.Camera.TestDriver do
     opts = Map.new(opts)
     {:ok, info} = stream_info(Enum.to_list(opts))
     # Externally paced so a test closes a measurement window by sending the
-    # hub `{:tick, monotonic_ns}`, rather than waiting a real second for one.
+    # hub `{:tick, monotonic_ns}`, and retries a failed capture by sending it
+    # `:retry_capture`, rather than waiting a real second for either.
     {:ok, hub} =
-      Hub.start_link(bb: opts.bb, stream_info: info, publish_rate: :external)
+      Hub.start_link(
+        bb: opts.bb,
+        stream_info: info,
+        publish_rate: :external,
+        retry_delay: :external
+      )
 
     {:ok, %{bb: opts.bb, hub: hub, reporter: nil, sequence: 0}}
   end
