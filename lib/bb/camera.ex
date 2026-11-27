@@ -54,6 +54,10 @@ defmodule BB.Camera do
   what survives. That is also why this package refuses interframe codecs
   outright - see `BB.Camera.Format`.
 
+  An estimator declared inside a camera sensor is a consumer of the second
+  kind, and receives each `BB.Camera.Frame` in `c:BB.Estimator.handle_input/2`.
+  See `BB.Camera.EstimatorSource`.
+
   ## Writing a driver
 
   One module, `use BB.Sensor` and `use BB.Camera`. One callback of your own,
@@ -126,6 +130,11 @@ defmodule BB.Camera do
   defmacro __using__(_opts) do
     quote do
       @behaviour BB.Camera
+
+      @impl BB.Sensor
+      def estimator_source, do: BB.Camera.EstimatorSource
+
+      defoverridable estimator_source: 0
     end
   end
 
