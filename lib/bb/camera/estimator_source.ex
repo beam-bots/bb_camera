@@ -24,12 +24,21 @@ defmodule BB.Camera.EstimatorSource do
   `monotonic_time` - when it was captured, not when it was delivered.
 
   The estimator stays subscribed through the end of a capture, and through a
-  failed one: the hub restarts a capture that ended cleanly while anyone is
-  still subscribed, and a failed one starts again when somebody new subscribes.
-  An estimator whose camera has stopped producing is told so by `lost_after`,
-  as one whose sensor has stopped publishing is. A camera whose hub has gone
-  is a different matter - the subscription is dead - so the estimator stops,
-  and its supervisor starts it again against the new one.
+  failed one. The hub restarts a capture that ended cleanly while anyone is
+  still subscribed, so a clean end is only a pause, and the estimator asks
+  again. A failed capture starts again only when somebody new subscribes, so
+  it is reported as `{:failed, error}`: the estimator goes `:lost` with
+  reason `:source_failed`, firing its `on_lost`, and asks again, recovering
+  when frames resume. An estimator whose camera has stopped producing for any
+  other reason is told so by `lost_after`, as one whose sensor has stopped
+  publishing is.
+
+  A camera whose hub has gone is a different matter - the subscription is
+  dead - so the source reports it ended and the estimator goes `:lost` with
+  reason `:source_ended`. It doesn't stop itself. The hub is linked to its
+  driver, so the driver has gone too, and `BB.SensorEstimatorSupervisor`
+  restarts the driver and then the estimator, which subscribes to the new
+  driver's hub.
   """
 
   @behaviour BB.Estimator.Source
@@ -56,8 +65,8 @@ defmodule BB.Camera.EstimatorSource do
   # session.
   def input_event(%Subscription{ref: ref}, {:bb_camera, ref, :end_of_capture}), do: :spent
 
-  def input_event(%Subscription{ref: ref}, {:bb_camera, ref, {:capture_failed, _error}}),
-    do: :spent
+  def input_event(%Subscription{ref: ref}, {:bb_camera, ref, {:capture_failed, error}}),
+    do: {:failed, error}
 
   def input_event(%Subscription{monitor: monitor}, {:DOWN, monitor, :process, _hub, reason}),
     do: {:ended, reason}

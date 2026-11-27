@@ -6,10 +6,11 @@ defmodule BB.Camera.EstimatorSourceTest do
   use ExUnit.Case, async: false
 
   alias BB.Camera
-  alias BB.Camera.{Frame, Hub, Media, Synthetic, TestEstimator}
+  alias BB.Camera.{Frame, Hub, Media, Synthetic}
   alias BB.Error.Hardware.Camera.CaptureFailed
   alias BB.Message
   alias BB.Message.Camera.{BeginCapture, EndCapture}
+  alias BB.Test.RecordingEstimator
 
   @camera_path [:sensor, :head, :eye]
 
@@ -20,7 +21,7 @@ defmodule BB.Camera.EstimatorSourceTest do
     topology do
       link :head do
         sensor :eye, {Synthetic, clock: :external} do
-          estimator(:watcher, TestEstimator)
+          estimator(:watcher, RecordingEstimator)
         end
       end
     end
@@ -33,7 +34,7 @@ defmodule BB.Camera.EstimatorSourceTest do
     topology do
       link :head do
         sensor :eye, {Synthetic, clock: :external} do
-          estimator(:watcher, {TestEstimator, gated: true})
+          estimator(:watcher, {RecordingEstimator, gated: true})
         end
       end
     end
@@ -46,7 +47,7 @@ defmodule BB.Camera.EstimatorSourceTest do
     topology do
       link :head do
         sensor :eye, {Synthetic, clock: :external} do
-          estimator :watcher, TestEstimator do
+          estimator :watcher, RecordingEstimator do
             max_input_age(~u(1 nanosecond))
           end
         end
@@ -61,7 +62,7 @@ defmodule BB.Camera.EstimatorSourceTest do
     topology do
       link :head do
         sensor :eye, {Synthetic, clock: :external} do
-          estimator :watcher, TestEstimator do
+          estimator :watcher, RecordingEstimator do
             lost_after(~u(1 millisecond))
           end
         end
@@ -76,7 +77,7 @@ defmodule BB.Camera.EstimatorSourceTest do
     topology do
       link :head do
         sensor :eye, {Synthetic, clock: :external, fail_capture: true} do
-          estimator(:watcher, TestEstimator)
+          estimator(:watcher, RecordingEstimator)
         end
       end
     end
@@ -153,13 +154,16 @@ defmodule BB.Camera.EstimatorSourceTest do
       assert_receive {:received, :input, %Frame{}}
     end
 
-    test "the estimator stays subscribed through a failed capture, and resumes when it restarts" do
+    test "a failed capture makes the estimator lost, and it recovers when capture restarts" do
+      attach_telemetry(WatchedCamera, [[:bb, :estimator, :transition]])
       estimator = start_watched(WatchedCamera)
       {:ok, hub} = Camera.hub(WatchedCamera, :eye)
 
       :ok = Hub.capture_failed(hub, CaptureFailed.exception(camera: :eye, reason: :test))
       assert_receive {:bb, @camera_path, %Message{payload: %EndCapture{reason: :error}}}
-      :sys.get_state(estimator)
+
+      assert_receive {:telemetry, :transition,
+                      %{from: :healthy, to: :lost, reason: :source_failed}}
 
       {:ok, session} = Media.open(WatchedCamera, :eye)
       on_exit(fn -> Media.close(session) end)
@@ -167,39 +171,60 @@ defmodule BB.Camera.EstimatorSourceTest do
 
       :ok = Synthetic.capture_frame(WatchedCamera, :eye)
       assert_receive {:received, :input, %Frame{}}
+      assert_receive {:telemetry, :transition, %{from: :lost, to: :degraded, reason: :recovered}}
       assert BB.Process.whereis(WatchedCamera, :watcher) == estimator
     end
 
-    test "a camera that cannot capture leaves its estimator running, not restarting" do
+    test "a camera that cannot capture leaves its estimator lost and running, not restarting" do
+      attach_telemetry(BrokenCamera, [[:bb, :estimator, :transition]])
       start_robot(BrokenCamera)
       {:ok, hub} = Camera.hub(BrokenCamera, :eye)
       assert Hub.capture_state(hub) == :idle
 
       estimator = BB.Process.whereis(BrokenCamera, :watcher)
       monitor = Process.monitor(estimator)
+
+      assert_receive {:telemetry, :transition, %{to: :lost, reason: :source_failed}}
       :sys.get_state(estimator)
 
       refute_received {:DOWN, ^monitor, _, _, _}
       refute_received {:received, :input, _}
     end
+  end
 
-    test "a dead hub stops the estimator, which subscribes to the camera's next one" do
-      estimator = start_watched(WatchedCamera)
-      monitor = Process.monitor(estimator)
-
-      WatchedCamera
-      |> BB.Process.whereis(:eye)
-      |> Process.exit(:kill)
-
-      assert_receive {:DOWN, ^monitor, :process, ^estimator,
-                      {:shutdown, {:source_ended, :parent, _reason}}}
-
-      assert_receive {:bb, @camera_path, %Message{payload: %BeginCapture{}}}
-
-      :ok = Synthetic.capture_frame(WatchedCamera, :eye)
-      assert_receive {:received, :input, %Frame{}}
-      assert BB.Process.whereis(WatchedCamera, :watcher) != estimator
+  describe "the estimator restarts with its camera" do
+    test "after the driver crashes, it receives frames from the new hub" do
+      assert_restarts_against_new_hub(fn -> BB.Process.whereis(WatchedCamera, :eye) end)
     end
+
+    test "after the hub crashes, it receives frames from the new hub" do
+      assert_restarts_against_new_hub(fn ->
+        {:ok, hub} = Camera.hub(WatchedCamera, :eye)
+        hub
+      end)
+    end
+  end
+
+  # The estimator is stopped by its supervisor - exit reason `:shutdown` - not
+  # by itself, and the replacement subscribes only after the new driver, and
+  # so the new hub, is running. Were it started first, its subscribe would
+  # fail in `init/1` and it would never see a frame.
+  defp assert_restarts_against_new_hub(victim) do
+    estimator = start_watched(WatchedCamera)
+    {:ok, old_hub} = Camera.hub(WatchedCamera, :eye)
+    estimator_monitor = Process.monitor(estimator)
+
+    Process.exit(victim.(), :kill)
+
+    assert_receive {:DOWN, ^estimator_monitor, :process, ^estimator, :shutdown}
+    assert_receive {:bb, @camera_path, %Message{payload: %BeginCapture{}}}
+
+    :ok = Synthetic.capture_frame(WatchedCamera, :eye)
+    assert_receive {:received, :input, %Frame{}}
+
+    {:ok, new_hub} = Camera.hub(WatchedCamera, :eye)
+    assert new_hub != old_hub
+    assert BB.Process.whereis(WatchedCamera, :watcher) != estimator
   end
 
   defp start_watched(robot) do
@@ -214,8 +239,8 @@ defmodule BB.Camera.EstimatorSourceTest do
   # returns. It is too early to have seen `BeginCapture` on PubSub, which can't
   # be subscribed to until the robot is running.
   defp start_robot(robot) do
-    :persistent_term.put({TestEstimator, robot}, self())
-    on_exit(fn -> :persistent_term.erase({TestEstimator, robot}) end)
+    :persistent_term.put({RecordingEstimator, robot}, self())
+    on_exit(fn -> :persistent_term.erase({RecordingEstimator, robot}) end)
     start_supervised!(robot)
     :sys.get_state(BB.Process.whereis(robot, :eye))
     {:ok, _} = BB.subscribe(robot, @camera_path)
