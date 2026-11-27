@@ -6,7 +6,7 @@ defmodule BB.Camera.EstimatorSourceTest do
   use ExUnit.Case, async: false
 
   alias BB.Camera
-  alias BB.Camera.{Frame, Hub, Media, Synthetic}
+  alias BB.Camera.{Frame, Hub, Synthetic}
   alias BB.Error.Hardware.Camera.CaptureFailed
   alias BB.Message
   alias BB.Message.Camera.{BeginCapture, EndCapture}
@@ -20,7 +20,7 @@ defmodule BB.Camera.EstimatorSourceTest do
 
     topology do
       link :head do
-        sensor :eye, {Synthetic, clock: :external} do
+        sensor :eye, {Synthetic, clock: :external, retry_delay: :external} do
           estimator(:watcher, RecordingEstimator)
         end
       end
@@ -154,7 +154,7 @@ defmodule BB.Camera.EstimatorSourceTest do
       assert_receive {:received, :input, %Frame{}}
     end
 
-    test "a failed capture makes the estimator lost, and it recovers when capture restarts" do
+    test "a failed capture makes the estimator lost, and it recovers when the hub retries" do
       attach_telemetry(WatchedCamera, [[:bb, :estimator, :transition]])
       estimator = start_watched(WatchedCamera)
       {:ok, hub} = Camera.hub(WatchedCamera, :eye)
@@ -165,8 +165,8 @@ defmodule BB.Camera.EstimatorSourceTest do
       assert_receive {:telemetry, :transition,
                       %{from: :healthy, to: :lost, reason: :source_failed}}
 
-      {:ok, session} = Media.open(WatchedCamera, :eye)
-      on_exit(fn -> Media.close(session) end)
+      # The estimator is still subscribed, so the hub retries capture for it.
+      send(hub, :retry_capture)
       assert_receive {:bb, @camera_path, %Message{payload: %BeginCapture{}}}
 
       :ok = Synthetic.capture_frame(WatchedCamera, :eye)
