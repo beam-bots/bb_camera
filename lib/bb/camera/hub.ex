@@ -53,9 +53,13 @@ defmodule BB.Camera.Hub do
   attributed to the session it belongs to, so a new consumer is never told that
   a capture it was never part of has ended.
 
-  A capture failure is not retried automatically. Subscribers are told, and the
-  hub returns to `:idle`; a driver whose device is missing would otherwise be
-  restarted in a tight loop for as long as anyone was watching.
+  A capture failure is retried while anyone is still watching, after a backoff
+  that doubles with each consecutive failure up to a ceiling. Subscribers are
+  told of every failure, and the hub returns to `:idle` while it waits. A
+  consumer arriving during the wait joins the retry rather than starting a
+  capture of its own, so a device that keeps failing is never restarted in a
+  tight loop however many consumers come and go. The retries stop when the
+  last subscriber leaves, and a capture that starts resets the backoff.
 
   ## How fast it is really going
 
@@ -89,6 +93,9 @@ defmodule BB.Camera.Hub do
 
   use GenServer
 
+  import BB.Unit
+  import BB.Unit.Option
+
   alias BB.Camera.{Format, Frame, StreamInfo}
   alias BB.Error.Invalid.Camera.StaleFrame
   alias BB.Error.State.Camera.NotCapturing
@@ -96,6 +103,7 @@ defmodule BB.Camera.Hub do
   alias BB.Message.Camera.{BeginCapture, CaptureState, EndCapture}
   alias BB.Robot.Runtime
   alias BB.Robot.State, as: RobotState
+  alias BB.Robot.Units
 
   require Logger
 
@@ -129,6 +137,23 @@ defmodule BB.Camera.Hub do
       `System.monotonic_time(:nanosecond)` unless you mean to measure against
       something else.
       """
+    ],
+    retry_delay: [
+      type: {:or, [unit_type(compatible: :second), {:in, [:external]}]},
+      default: ~u(1 second),
+      doc: """
+      How long to wait before retrying a failed capture while subscribers
+      remain. Doubles with each consecutive failure, up to `:max_retry_delay`,
+      and returns to this when a capture starts.
+
+      `:external` instead of a duration means the hub schedules no retry of
+      its own and retries only when sent `:retry_capture`.
+      """
+    ],
+    max_retry_delay: [
+      type: unit_type(compatible: :second),
+      default: ~u(30 second),
+      doc: "The longest the backoff between retries grows to"
     ]
   ]
 
@@ -218,8 +243,8 @@ defmodule BB.Camera.Hub do
   Report that capture failed.
 
   Publishes `BB.Message.Camera.EndCapture` with `reason: :error` and hands the
-  error to every subscriber of the session that failed. The hub does not
-  restart capture by itself afterwards.
+  error to every subscriber of the session that failed. While anyone is still
+  subscribed, the hub asks for capture again after a backoff.
   """
   @spec capture_failed(GenServer.server(), struct()) :: :ok
   def capture_failed(hub, error) do
@@ -317,7 +342,11 @@ defmodule BB.Camera.Hub do
        publish_rate: opts[:publish_rate] || @default_publish_rate,
        publish_loop: nil,
        window_frames: 0,
-       measured_frame_rate: nil
+       measured_frame_rate: nil,
+       retry: nil,
+       retry_delay: milliseconds(opts[:retry_delay]),
+       next_retry_delay: milliseconds(opts[:retry_delay]),
+       max_retry_delay: milliseconds(opts[:max_retry_delay])
      }}
   end
 
@@ -402,8 +431,9 @@ defmodule BB.Camera.Hub do
     state = if stream_info, do: replace_stream_info(state, stream_info), else: state
 
     state = %{
-      state
-      | capture_state: if(state.capture_state == :stopping, do: :stopping, else: :capturing),
+      cancel_retry(state)
+      | next_retry_delay: state.retry_delay,
+        capture_state: if(state.capture_state == :stopping, do: :stopping, else: :capturing),
         frame_count: 0,
         last_sequence: nil,
         latest: nil,
@@ -482,13 +512,25 @@ defmodule BB.Camera.Hub do
     {:noreply, close_window(%{state | publish_loop: loop}, dt)}
   end
 
+  # A timer that fires after its retry was cancelled carries a reference the
+  # hub no longer holds, and falls through to be ignored.
+  def handle_info({:timeout, timer, :retry_capture}, %{retry: timer} = state),
+    do: {:noreply, retry_capture(state)}
+
+  def handle_info(:retry_capture, %{retry: :external} = state),
+    do: {:noreply, retry_capture(state)}
+
   def handle_info(_message, state), do: {:noreply, state}
 
   # ----------------------------------------------------------------------------
   # Capture lifecycle
   # ----------------------------------------------------------------------------
 
-  defp request_capture(%{capture_state: :idle} = state) do
+  # While a retry is waiting, a consumer that arrives joins it rather than
+  # starting a capture of its own: otherwise every consumer that came along
+  # would cut the backoff short, and a camera whose device is missing would be
+  # restarted as often as anyone cared to subscribe.
+  defp request_capture(%{capture_state: :idle, retry: nil} = state) do
     send(state.driver, {:bb_camera, :start_capture})
 
     %{
@@ -503,6 +545,8 @@ defmodule BB.Camera.Hub do
 
   defp release_capture(%{subscribers: subscribers} = state) when map_size(subscribers) > 0,
     do: state
+
+  defp release_capture(%{retry: retry} = state) when retry != nil, do: cancel_retry(state)
 
   defp release_capture(%{capture_state: state_name} = state)
        when state_name in [:starting, :capturing] do
@@ -528,12 +572,43 @@ defmodule BB.Camera.Hub do
         measured_frame_rate: nil
     }
 
-    if reason != :error and map_size(state.subscribers) > 0 do
-      request_capture(state)
-    else
-      state
-    end
+    resume_capture(state, reason)
   end
+
+  defp resume_capture(%{subscribers: subscribers} = state, _reason)
+       when map_size(subscribers) == 0,
+       do: state
+
+  defp resume_capture(state, :error), do: schedule_retry(state)
+  defp resume_capture(state, _reason), do: request_capture(state)
+
+  defp schedule_retry(%{retry_delay: :external} = state),
+    do: %{cancel_retry(state) | retry: :external}
+
+  defp schedule_retry(state) do
+    delay = min(state.next_retry_delay, state.max_retry_delay)
+    timer = :erlang.start_timer(delay, self(), :retry_capture)
+
+    %{
+      cancel_retry(state)
+      | retry: timer,
+        next_retry_delay: min(delay * 2, state.max_retry_delay)
+    }
+  end
+
+  defp retry_capture(state), do: request_capture(%{state | retry: nil})
+
+  defp cancel_retry(%{retry: timer} = state) when is_reference(timer) do
+    :erlang.cancel_timer(timer)
+    %{state | retry: nil}
+  end
+
+  defp cancel_retry(state), do: %{state | retry: nil}
+
+  defp milliseconds(:external), do: :external
+
+  defp milliseconds(duration),
+    do: System.convert_time_unit(Units.to_nanoseconds(duration), :nanosecond, :millisecond)
 
   defp termination_message(:error, error), do: {:capture_failed, error}
   defp termination_message(_reason, _error), do: :end_of_capture

@@ -52,6 +52,15 @@ that test awkward, the change is wrong.
   request is still outstanding and must survive into the next session.
   Clearing it is invisible to the consumer, which then sits out its whole
   timeout on a camera that restarted perfectly well.
+- **A failed capture is retried, with backoff, only while someone is
+  watching.** The delay doubles with each consecutive failure up to
+  `:max_retry_delay` and resets when a capture starts. A consumer arriving
+  during the wait joins the retry rather than starting a capture of its own;
+  otherwise consumers coming and going would restart a missing device in a
+  tight loop. The hub stays `:idle` while it waits instead of gaining a fifth
+  state, and a retry is an ordinary request for capture, so it begins a
+  session like any other. Tests drive it with `retry_delay: :external` and
+  `:retry_capture`.
 - **The Membrane source releases its subscription at end of stream.** Staying
   subscribed would keep the hub's subscriber count above zero, which is what
   it restarts capture on — leaving a camera capturing for an element that will

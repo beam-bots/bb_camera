@@ -5,6 +5,8 @@
 defmodule BB.Camera.HubTest do
   use ExUnit.Case, async: false
 
+  import BB.Unit
+
   alias BB.Camera
   alias BB.Camera.{Frame, Hub, Media, StreamInfo, TestDriver}
   alias BB.Camera.TestBots.GatedCamera
@@ -58,18 +60,6 @@ defmodule BB.Camera.HubTest do
 
       assert_receive {:bb_camera, ^ref, {:capture_failed, ^error}}
       assert_receive {:bb, _, %BB.Message{payload: %EndCapture{reason: :error}}}
-    end
-
-    test "a failed capture is not retried while subscribers remain" do
-      {:ok, _subscription} = Camera.subscribe(GatedCamera, :eye)
-      assert_receive {:driver, :start_capture}
-
-      :ok = TestDriver.fail(GatedCamera, :eye, CaptureFailed.exception(camera: :eye))
-
-      # Push a call through the driver so anything it was going to be sent has
-      # already arrived, then check nothing was.
-      :ok = TestDriver.report_to(GatedCamera, :eye)
-      refute_received {:driver, :start_capture}
     end
 
     test "capture stops when the last subscriber goes" do
@@ -167,6 +157,154 @@ defmodule BB.Camera.HubTest do
       :ok = TestDriver.deliver(GatedCamera, :eye, "session-two")
 
       assert_receive {:bb_camera, ^ref, %Frame{data: "session-two" <> _, sequence: 0}}
+    end
+  end
+
+  describe "retrying a failed capture" do
+    setup do
+      {:ok, hub} = Camera.hub(GatedCamera, :eye)
+      %{hub: hub}
+    end
+
+    test "waits for the backoff rather than retrying at once", %{hub: hub} do
+      {:ok, _subscription} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+
+      :ok = TestDriver.fail(GatedCamera, :eye, CaptureFailed.exception(camera: :eye))
+
+      # Push a call through the driver so anything it was going to be sent has
+      # already arrived, then check nothing was.
+      :ok = TestDriver.report_to(GatedCamera, :eye)
+      refute_received {:driver, :start_capture}
+
+      send(hub, :retry_capture)
+      assert_receive {:driver, :start_capture}
+    end
+
+    test "tells subscribers of every failure, not just the first", %{hub: hub} do
+      {:ok, subscription} = Camera.subscribe(GatedCamera, :eye)
+      ref = subscription.ref
+      assert_receive {:driver, :start_capture}
+
+      first = CaptureFailed.exception(camera: :eye, reason: :first)
+      :ok = TestDriver.fail(GatedCamera, :eye, first)
+      assert_receive {:bb_camera, ^ref, {:capture_failed, ^first}}
+
+      send(hub, :retry_capture)
+      assert_receive {:driver, :start_capture}
+
+      second = CaptureFailed.exception(camera: :eye, reason: :second)
+      :ok = TestDriver.fail(GatedCamera, :eye, second)
+      assert_receive {:bb_camera, ^ref, {:capture_failed, ^second}}
+    end
+
+    test "a consumer arriving during the backoff joins the retry", %{hub: hub} do
+      {:ok, _first} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.fail(GatedCamera, :eye, CaptureFailed.exception(camera: :eye))
+
+      {:ok, _second} = Camera.subscribe(GatedCamera, :eye)
+      :ok = TestDriver.report_to(GatedCamera, :eye)
+      refute_received {:driver, :start_capture}
+
+      send(hub, :retry_capture)
+      assert_receive {:driver, :start_capture}
+
+      :ok = TestDriver.report_to(GatedCamera, :eye)
+      refute_received {:driver, :start_capture}
+    end
+
+    test "a retry that succeeds is a new session like any other", %{hub: hub} do
+      BB.subscribe(GatedCamera, [:sensor, :head, :eye])
+      {:ok, first} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.fail(GatedCamera, :eye, CaptureFailed.exception(camera: :eye))
+
+      # Arrives during the backoff, and asks for a frame before there is any
+      # capture to take one from.
+      {:ok, second} = Camera.subscribe(GatedCamera, :eye)
+      :ok = Camera.request(second)
+
+      send(hub, :retry_capture)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.confirm_start(GatedCamera, :eye)
+      assert_receive {:bb, _, %BB.Message{payload: %BeginCapture{subscriber_count: 2}}}
+
+      :ok = Camera.request(first)
+      :ok = TestDriver.deliver(GatedCamera, :eye, "after-retry")
+
+      first_ref = first.ref
+      second_ref = second.ref
+      assert_receive {:bb_camera, ^first_ref, %Frame{data: "after-retry" <> _, sequence: 0}}
+      assert_receive {:bb_camera, ^second_ref, %Frame{data: "after-retry" <> _, sequence: 0}}
+    end
+
+    test "stops when the last subscriber leaves", %{hub: hub} do
+      {:ok, subscription} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+      :ok = TestDriver.fail(GatedCamera, :eye, CaptureFailed.exception(camera: :eye))
+
+      :ok = Camera.unsubscribe(subscription)
+      send(hub, :retry_capture)
+
+      assert Hub.capture_state(hub) == :idle
+      :ok = TestDriver.report_to(GatedCamera, :eye)
+      refute_received {:driver, :start_capture}
+
+      # With nothing waiting, the next consumer starts capture straight away.
+      {:ok, _subscription} = Camera.subscribe(GatedCamera, :eye)
+      assert_receive {:driver, :start_capture}
+    end
+  end
+
+  describe "the retry backoff" do
+    setup do
+      {:ok, info} = StreamInfo.new(format: {:raw, :I420}, width: 64, height: 48)
+      %{bb: %{robot: GatedCamera, path: [:head, :spare]}, stream_info: info}
+    end
+
+    test "retries on a timer of its own", %{bb: bb, stream_info: info} do
+      {:ok, hub} =
+        Hub.start_link(
+          bb: bb,
+          stream_info: info,
+          publish_rate: :external,
+          retry_delay: ~u(0 second)
+        )
+
+      {:ok, _ref, _info} = Hub.subscribe(hub, self(), [])
+      assert_receive {:bb_camera, :start_capture}
+
+      :ok = Hub.capture_failed(hub, CaptureFailed.exception(camera: :spare))
+
+      assert_receive {:bb_camera, :start_capture}
+    end
+
+    test "doubles with each consecutive failure up to its ceiling, and resets on success", %{
+      bb: bb,
+      stream_info: info
+    } do
+      # Delays far longer than the test, so a timer's remaining time says
+      # which delay it was set for without anything having to wait for it.
+      {:ok, hub} =
+        Hub.start_link(
+          bb: bb,
+          stream_info: info,
+          publish_rate: :external,
+          retry_delay: ~u(1000 second),
+          max_retry_delay: ~u(3000 second)
+        )
+
+      {:ok, _ref, _info} = Hub.subscribe(hub, self(), [])
+      assert_receive {:bb_camera, :start_capture}
+
+      assert fail_and_read_backoff(hub) in 1..1_000_000
+      assert fail_and_read_backoff(hub) in 1_000_001..2_000_000
+      assert fail_and_read_backoff(hub) in 2_000_001..3_000_000
+      assert fail_and_read_backoff(hub) in 2_000_001..3_000_000
+
+      :ok = Hub.capture_started(hub)
+      assert fail_and_read_backoff(hub) in 1..1_000_000
     end
   end
 
@@ -620,6 +758,21 @@ defmodule BB.Camera.HubTest do
       assert_receive {:driver, :start_capture}
       assert_receive {:driver, :stop_capture}
     end
+  end
+
+  # Fails the capture the hub is starting and reads how long the retry it
+  # scheduled has left, then fires that retry by hand so the hub asks for
+  # capture again.
+  defp fail_and_read_backoff(hub) do
+    :ok = Hub.capture_failed(hub, CaptureFailed.exception(camera: :spare))
+
+    %{retry: timer} = :sys.get_state(hub)
+    remaining_ms = :erlang.read_timer(timer)
+
+    send(hub, {:timeout, timer, :retry_capture})
+    assert_receive {:bb_camera, :start_capture}
+
+    remaining_ms
   end
 
   defp test_frame(label, opts \\ []) do
