@@ -104,6 +104,17 @@ defmodule BB.Camera.SyntheticTest do
       assert_receive {:bb, _, %BB.Message{payload: %EndCapture{reason: :error}}}
     end
 
+    test "passes its retry delay to the hub, which retries while it is watched" do
+      BB.subscribe(FailingCamera, [:sensor, :head, :eye])
+      {:ok, _session} = Media.open(FailingCamera, :eye)
+      assert_receive {:bb, _, %BB.Message{payload: %EndCapture{reason: :error}}}
+
+      {:ok, hub} = Camera.hub(FailingCamera, :eye)
+      send(hub, :retry_capture)
+
+      assert_receive {:bb, _, %BB.Message{payload: %EndCapture{reason: :error}}}
+    end
+
     test "never claims to be capturing" do
       {:ok, _session} = Media.open(FailingCamera, :eye)
 

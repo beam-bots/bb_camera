@@ -35,7 +35,10 @@ defmodule BB.Camera.TestBots.FailingCamera do
 
   topology do
     link :head do
-      sensor(:eye, {BB.Camera.Synthetic, clock: :external, fail_capture: true})
+      sensor(
+        :eye,
+        {BB.Camera.Synthetic, clock: :external, fail_capture: true, retry_delay: :external}
+      )
     end
   end
 end

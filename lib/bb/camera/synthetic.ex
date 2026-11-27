@@ -61,6 +61,14 @@ defmodule BB.Camera.Synthetic do
         `:external` to publish only when it is sent `{:tick, monotonic_ns}`
         """
       ],
+      retry_delay: [
+        type: {:or, [unit_type(compatible: :second), {:in, [:external]}]},
+        default: ~u(1 second),
+        doc: """
+        How long the hub waits before retrying a failed capture, or `:external`
+        to retry only when the hub is sent `:retry_capture`
+        """
+      ],
       frames: [
         type: {:list, :string},
         doc: "Raw `:I420` frames at the configured size to cycle through, instead of the defaults"
@@ -152,7 +160,8 @@ defmodule BB.Camera.Synthetic do
         Hub.start_link(
           bb: opts.bb,
           stream_info: stream_info,
-          publish_rate: opts.publish_rate
+          publish_rate: opts.publish_rate,
+          retry_delay: opts.retry_delay
         )
 
       {:ok,
